@@ -28,21 +28,9 @@ import json, os, time
 BASE = os.environ.get("TG_BRIDGE_DIR") or os.path.expanduser("~/tg-bridge")
 INBOX = os.path.join(BASE, "inbox")
 STATE = os.path.join(BASE, "state")
-CLAIMS_F = os.path.join(STATE, "claims.json")
 FAILED = os.path.join(STATE, "failed")
 DRY = os.environ.get("TG_BRIDGE_DRY_RUN") == "1"
 os.makedirs(FAILED, exist_ok=True)
-def load_claims():
-    try:
-        return json.load(open(CLAIMS_F, encoding="utf-8"))
-    except Exception:
-        return {}
-def save_claims(c):
-    tmp = CLAIMS_F + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(c, f)
-    os.replace(tmp, CLAIMS_F)
-
 # Deadletter consumption (per-line tolerant, not all-or-nothing:
 # one bad line must not drop the whole file. Good lines wake,
 # bad lines go to deadletter-bad-<ts>.jsonl, original is archived.)
@@ -73,7 +61,7 @@ if os.path.isfile(_DL) and os.path.getsize(_DL) > 0:
 
 # Main-agent mode: deliver ONCE, then move to done. No lease,
 # no repeat, no head-of-line blocking. The main agent's reply IS the
-# handling, tg_send --done is NOT required to clear a claim.
+# handling.
 # If delivery fails, the record is still in done/ for recovery.
 _DONE = os.path.join(INBOX, "done")
 os.makedirs(_DONE, exist_ok=True)
@@ -104,10 +92,6 @@ if len(payload.get("text") or "") > 6000:
 if not DRY:
     try:
         os.replace(os.path.join(INBOX, fname), os.path.join(_DONE, fname))
-        # Clear any stale claim for this uid
-        _c = load_claims()
-        _c.pop(uid, None)
-        save_claims(_c)
     except OSError as _me:
         try:
             with open(os.path.join(STATE, "hook-errors.log"), "a", encoding="utf-8") as _ef:

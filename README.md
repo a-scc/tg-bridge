@@ -29,7 +29,7 @@ next record instead of being blocked by the head of the queue.
   `inbox/done/`); it never recreates a missing record.
 - `typing_refresher.py` — separate process, NOT inside `tg_send.py`.
   Sends `sendChatAction` typing while work is active. It is pending
-  while inbox files exist, claims exist, or the work marker
+  while inbox files exist, or the work marker
   `state/typing_active.json` exists and is not stale. The checker
   creates the marker on wake; `tg_send.py --done` / `--ack-only`
   clears it. Singleton via `state/typing.lock`.

@@ -18,6 +18,7 @@ never block the poll loop or overwrite a marker with an error.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 
@@ -79,8 +80,33 @@ def main():
             pulled = False
             tg_pull = os.path.join(base, "tg_pull.py")
             if os.path.isfile(tg_pull):
-                r = subprocess.run([sys.executable, tg_pull, inbox], capture_output=True, timeout=120)
-                pulled = r.returncode == 0
+                # Timeout scales with file size: near-threshold files can
+                # take minutes on slow links (see README). Floor 180s plus
+                # headroom for size at 100 KiB/s. Detached, never blocks poll.
+                try:
+                    _timeout = max(180, int(size / (100 * 1024)) + 60)
+                except Exception:
+                    _timeout = 180
+                # New session: on timeout kill the whole process group.
+                # Killing only tg_pull would orphan its sftp child,
+                # which would keep writing dest in the background.
+                _p = subprocess.Popen(
+                    [sys.executable, tg_pull, inbox],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
+                try:
+                    _p.communicate(timeout=_timeout)
+                    pulled = _p.returncode == 0
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(_p.pid, signal.SIGKILL)
+                    except Exception:
+                        pass
+                    _p.wait()
+                    _log(f"tg_pull timeout after {_timeout}s {inbox}")
+                    return 0
+            else:
+                pulled = False
             if not pulled:
                 _log(f"pull failed {inbox}")
                 return 0

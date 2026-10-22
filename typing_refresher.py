@@ -9,8 +9,8 @@ already running, exit immediately (do not stack refreshers).
 Stop condition: an independent work marker
 state/typing_active.json, created by hook on wake, cleared by
 tg_send --done / --ack-only when main chat replies. Refresher is
-pending if ANY of: inbox files exist, claims exist, OR marker exists
-and is not stale (>35 min). Inbox/claims alone cover the pre-wake
+pending if ANY of: inbox files exist, OR marker exists
+and is not stale (>35 min). Inbox files alone cover the pre-wake
 window (listener spawns refresher at intake, before hook wake);
 marker alone covers the post-wake long-thinking window.
 If marker is stale, refresher exits and removes it.
@@ -84,12 +84,6 @@ def pending():
         if any(n.endswith(".json") for n in os.listdir(INBOX_DIR)):
             return True
     except OSError:
-        pass
-    try:
-        claims = json.load(open(os.path.join(STATE_DIR, "claims.json"), encoding="utf-8"))
-        if claims:
-            return True
-    except Exception:
         pass
     try:
         marker = json.load(open(MARKER_FILE, encoding="utf-8"))

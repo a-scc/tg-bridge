@@ -24,7 +24,7 @@ import time
 import urllib.request
 import urllib.error
 
-# Simplified flow (do not revert to pulling large files to the main-agent host):
+# File flow: large files stay on the Bot API host, never cross the main-agent host.
 # Large files above the threshold: TG -> local Bot API once to Bot API host disk -> record path ->
 # Bot API host metadata small notification -> Bot API host local direct send back to TG,
 # never via the main-agent host. The main-agent host only receives the notification
@@ -557,7 +557,7 @@ def main():
                           file=sys.stderr, flush=True)
                     if failures[uid] >= 3:
                         # Deadletter: write ONCE to state/deadletter.jsonl,
-                        # NOT to inbox/claims (so it cannot re-trigger itself),
+                        # NOT to inbox/ (so it cannot re-trigger itself),
                         # then advance offset. This is the ONLY record left
                         # after offset advances, so it must carry the message
                         # content, not just update_id: message_id, kind,

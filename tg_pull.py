@@ -34,6 +34,14 @@ import shutil
 import subprocess
 import sys
 
+
+def _sftp_quote(p):
+    # sftp batch mode splits on whitespace; quote both paths and
+    # escape embedded backslashes and double quotes. This is the
+    # backstop for old records whose names predate the safe_file_name
+    # space/quote sanitizing.
+    return '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
 DEFAULT_MAX_MB = 50
 
 
@@ -93,6 +101,26 @@ def main():
               f"threshold={max_bytes} force={args.force}")
         return 0
 
+    # A previous size-mismatch run left dest.partial behind. Decide
+    # before transferring, not after: a .partial SMALLER than the
+    # recorded size is a true partial, move it back so reget resumes
+    # it. A .partial at or above the recorded size means the remote
+    # file changed after a complete transfer; drop the stale copy and
+    # download fresh (it will be re-verified below).
+    _partial = dest + ".partial"
+    if size is not None and os.path.isfile(_partial):
+        try:
+            _psz = os.path.getsize(_partial)
+        except OSError:
+            _psz = -1
+        try:
+            if 0 <= _psz < size:
+                os.replace(_partial, dest)
+            elif _psz >= size:
+                os.remove(_partial)
+        except OSError:
+            pass
+
     # Same-machine shortcut
     if os.path.isfile(vps_path):
         shutil.copyfile(vps_path, dest)
@@ -113,7 +141,7 @@ def main():
             cmd += ["-i", key]
         cmd += [f"{user}@{host}"]
         # sftp batch: reget resumes a partial download
-        batch = f"reget {vps_path} {dest}\n"
+        batch = f"reget {_sftp_quote(vps_path)} {_sftp_quote(dest)}\n"
         r = subprocess.run(cmd, input=batch, text=True, capture_output=True)
         if r.returncode != 0:
             print(f"sftp failed: {r.stderr.strip()}", file=sys.stderr)

@@ -24,13 +24,21 @@ fi
 export TG_BRIDGE_DIR
 
 OUT="$(python3 - <<'PYEOF'
-import json, os, time
+import json, os, re, time
 BASE = os.environ.get("TG_BRIDGE_DIR") or os.path.expanduser("~/tg-bridge")
 INBOX = os.path.join(BASE, "inbox")
 STATE = os.path.join(BASE, "state")
 FAILED = os.path.join(STATE, "failed")
 DRY = os.environ.get("TG_BRIDGE_DRY_RUN") == "1"
-os.makedirs(FAILED, exist_ok=True)
+_VALID = re.compile(r"^\d+\.json$")
+
+def _log_hook(msg):
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        with open(os.path.join(STATE, "hook-errors.log"), "a", encoding="utf-8") as _ef:
+            _ef.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
 # Deadletter consumption (per-line tolerant, not all-or-nothing:
 # one bad line must not drop the whole file. Good lines wake,
 # bad lines go to deadletter-bad-<ts>.jsonl, original is archived.)
@@ -64,13 +72,31 @@ if os.path.isfile(_DL) and os.path.getsize(_DL) > 0:
 # handling.
 # If delivery fails, the record is still in done/ for recovery.
 _DONE = os.path.join(INBOX, "done")
-os.makedirs(_DONE, exist_ok=True)
+# Only numeric <update_id>.json files take part in delivery. A stray
+# non-numeric .json (hand-placed, test leftovers, another program's)
+# must never crash the sort and take the whole bridge down with it.
 files = []
+_bad = []
 if os.path.isdir(INBOX):
-    files = sorted(
-        (f for f in os.listdir(INBOX) if f.endswith(".json")),
-        key=lambda f: int(f.split(".")[0]),
-    )
+    for _f in os.listdir(INBOX):
+        if not _f.endswith(".json"):
+            continue
+        if _VALID.match(_f):
+            files.append(_f)
+        else:
+            _bad.append(_f)
+    files.sort(key=lambda _f: int(_f.split(".")[0]))
+# Quarantine the bad ones once: move to state/failed/ so they never
+# block delivery again. The move itself is the once-guarantee, so the
+# log line is written exactly once per file. Dry run changes nothing.
+if _bad and not DRY:
+    os.makedirs(FAILED, exist_ok=True)
+    for _bf in sorted(_bad):
+        try:
+            os.replace(os.path.join(INBOX, _bf), os.path.join(FAILED, _bf))
+            _log_hook(f"quarantined non-numeric inbox file {_bf}")
+        except OSError:
+            pass
 if not files:
     print("SILENT inbox-empty")
     print("{}")
@@ -90,14 +116,11 @@ if len(payload.get("text") or "") > 6000:
 # Move failure: log + do NOT wake, file stays
 # in inbox for next poll to retry the move.
 if not DRY:
+    os.makedirs(_DONE, exist_ok=True)
     try:
         os.replace(os.path.join(INBOX, fname), os.path.join(_DONE, fname))
     except OSError as _me:
-        try:
-            with open(os.path.join(STATE, "hook-errors.log"), "a", encoding="utf-8") as _ef:
-                _ef.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} move to done failed {fname}: {_me}\n")
-        except OSError:
-            pass
+        _log_hook(f"move to done failed {fname}: {_me}")
         print("SILENT move-failed")
         print(json.dumps({"update_id": int(uid), "error": str(_me)}, ensure_ascii=False))
         raise SystemExit

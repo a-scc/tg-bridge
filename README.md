@@ -1,3 +1,5 @@
+> [中文](README.zh-CN.md) | English
+
 # Telegram bridge (inbox-first, once-delivery)
 
 Pure standard-library Python. No external dependencies.

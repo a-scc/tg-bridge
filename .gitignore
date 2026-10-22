@@ -1,0 +1,7 @@
+.bot_token
+inbox/
+state/
+*.log
+__pycache__/
+*.pyc
+*.tmp

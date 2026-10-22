@@ -6,11 +6,10 @@ Usage:
   tg_send.py --stdin [--reply-to <message_id>] [--done <update_id>]
   tg_send.py --document <path> [--caption "..."] [--reply-to <message_id>] [--done <update_id>]
   tg_send.py --ack-only <update_id>          # close an inbox item without sending
-  tg_send.py --claim-refresh <update_id>     # renew the handling lease
 
 Sends plain text (no parse mode), splitting at 4096 chars on newline
 boundaries when possible. On successful send with --done, removes the
-inbox file and clears its claim. Token from .bot_token (600).
+inbox file. Token from .bot_token (600).
 Bot API base: TG_API_BASE_URL env, default https://api.telegram.org;
 set it to a local Bot API server (e.g. http://localhost:PORT via an SSH
 tunnel) to send via that server instead. Local uploads stream the file
@@ -18,8 +17,6 @@ instead of loading it whole into memory; cloud uploads are capped by
 Telegram at 50 MB, local uploads at 2 GB per file.
 """
 import argparse
-import contextlib
-import fcntl
 import http.client
 import json
 import os
@@ -36,7 +33,6 @@ TOKEN_FILE = os.path.join(BASE_DIR, ".bot_token")
 INBOX_DIR = os.path.join(BASE_DIR, "inbox")
 FILES_DIR = os.path.join(INBOX_DIR, "files")
 STATE_DIR = os.path.join(BASE_DIR, "state")
-CLAIMS_FILE = os.path.join(STATE_DIR, "claims.json")
 # Owner chat: TG_OWNER_ID env var is REQUIRED.
 # Env required at runtime, not at import, so --help works.
 # main() validates before any send/poll.
@@ -259,42 +255,11 @@ def split_text(text, limit=4096):
     return chunks
 
 
-def load_claims():
-    try:
-        return json.load(open(CLAIMS_FILE, encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def save_claims(claims):
-    tmp = CLAIMS_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(claims, f)
-    os.replace(tmp, CLAIMS_FILE)
-
-
-@contextlib.contextmanager
-def claims_lock():
-    """Fix 3: serialize load -> modify -> save across processes.
-    Without this, two tg_send invocations (agent + hook checker)
-    can read the same claims, modify different entries, and the
-    second save overwrites the first. flock is per-process on Linux,
-    so concurrent callers block here instead of racing."""
-    os.makedirs(STATE_DIR, exist_ok=True)
-    lock_path = os.path.join(STATE_DIR, "claims.lock")
-    with open(lock_path, "a+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-
 def mark_done(update_id):
     # Clear typing work marker, regardless of where the
     # record lives. Checker wake creates state/typing_active.json, main
     # agent reply (tg_send --done / --ack-only) clears it. This is the
-    # refresher stop signal, NOT inbox-empty + claims-clear.
+    # refresher stop signal.
     try:
         _marker = os.path.join(STATE_DIR, "typing_active.json")
         _m = json.load(open(_marker, encoding="utf-8"))
@@ -322,18 +287,16 @@ def mark_done(update_id):
         except Exception:
             pass
         return
-    # Cleanup: deleting the inbox record alone left the
-    # downloaded attachment in inbox/files/ forever. A large file
-    # would fill the disk, so close the item by removing its file too.
+    # Closing an item also removes its downloaded attachment:
+    # inbox/files/ would otherwise fill the disk over time.
     # Only delete paths that really live under inbox/files/; anything
     # else in the record is left alone as a safety guard.
     try:
         rec = json.load(open(path, encoding="utf-8"))
         file_local = rec.get("file_local") if isinstance(rec, dict) else None
         if file_local:
-            # abspath does not resolve symlinks,
-            # so a symlink inside inbox/files/ pointing outside would
-            # pass the old check. realpath resolves it and blocks it.
+            # realpath (not abspath): a symlink inside inbox/files/
+            # pointing outside must not pass this check.
             real_file = os.path.realpath(file_local)
             real_files = os.path.realpath(FILES_DIR)
             if real_file.startswith(real_files + os.sep):
@@ -347,10 +310,6 @@ def mark_done(update_id):
         os.remove(path)
     except OSError:
         pass
-    with claims_lock():
-        claims = load_claims()
-        claims.pop(str(update_id), None)
-        save_claims(claims)
 
 
 def main():
@@ -360,7 +319,6 @@ def main():
     mode.add_argument("--document")
     mode.add_argument("--stdin", action="store_true")
     mode.add_argument("--ack-only", type=int)
-    mode.add_argument("--claim-refresh", type=int)
     ap.add_argument("--caption", default="")
     ap.add_argument("--reply-to", type=int)
     ap.add_argument("--done", type=int)
@@ -369,27 +327,13 @@ def main():
     # Real sends are validated here, before any token/API use.
     if not OWNER_CHAT:
         raise SystemExit("TG_OWNER_ID env var is required (numeric Telegram user id)")
-    if args.done is not None and (args.ack_only is not None
-                                  or args.claim_refresh is not None):
-        ap.error("--done cannot be combined with --ack-only/--claim-refresh")
+    if args.done is not None and args.ack_only is not None:
+        ap.error("--done cannot be combined with --ack-only")
 
     if args.ack_only is not None:
         mark_done(args.ack_only)
         print(f"acked {args.ack_only}")
         return
-    if args.claim_refresh is not None:
-        with claims_lock():
-            claims = load_claims()
-            # Do not resurrect a claim that mark_done already removed:
-            # a late refresh must not recreate a finished item.
-            if str(args.claim_refresh) not in claims:
-                print(f"claim {args.claim_refresh} not found, not recreating")
-                return
-            claims[str(args.claim_refresh)]["claimed_at"] = int(time.time())
-            save_claims(claims)
-        print(f"claim refreshed {args.claim_refresh}")
-        return
-
     if args.document:
         token = load_token()
         resp, overflow = send_document(token, args.document,

@@ -44,7 +44,9 @@ next record instead of being blocked by the head of the queue.
   not by this script. Even if the checker itself crashes, it still
   prints `SILENT checker-error` + `{}` and exits 0, so a poller
   reading two lines never reads an empty stdout (the traceback,
-  if any, goes to stderr for debugging).
+  if any, goes to stderr for debugging). Non-numeric .json files in
+  inbox/ never take part in delivery: they are moved to state/failed/
+  once and logged once to state/hook-errors.log.
 
 ## Configuration (all via environment, no values are fixed in code)
 

@@ -55,13 +55,16 @@ def _append_history(rec):
             line["file_size"] = rec.get("file_size")
         with open(HISTORY_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(line, ensure_ascii=False) + "\n")
-        # rotate: if >2000 lines, keep last 1000
+        # rotate: if >2000 lines, keep last 1000. tmp + os.replace
+        # so a crash mid-rotation never leaves a half-written archive.
         try:
             with open(HISTORY_FILE, encoding="utf-8") as f:
                 lines = f.readlines()
             if len(lines) > 2000:
-                with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                _tmp = HISTORY_FILE + ".tmp"
+                with open(_tmp, "w", encoding="utf-8") as f:
                     f.writelines(lines[-1000:])
+                os.replace(_tmp, HISTORY_FILE)
         except OSError:
             pass
     except OSError:
@@ -329,10 +332,12 @@ def react(token, chat_id, message_id):
 
 def safe_file_name(uid, raw, default):
     r"""Sanitize a sender-supplied file name to a single file under
-    inbox/files/: basename first, then replace separators and control chars.
-    A name that collapses to . / .. / empty falls back to default."""
+    inbox/files/: basename first, then replace separators, control
+    chars, spaces and double quotes (spaces break sftp batch word
+    splitting, quotes break its quoting). A name that collapses to
+    . / .. / empty falls back to default."""
     base = os.path.basename(raw) if raw else default
-    base = "".join("_" if c in "/\\" or ord(c) < 32 or ord(c) == 127 else c
+    base = "".join("_" if c in "/\\ \"" or ord(c) < 32 or ord(c) == 127 else c
                    for c in base).strip()
     if not base or base in (".", ".."):
         base = default
@@ -501,6 +506,7 @@ def main():
     _lock = acquire_singleton()
     _cleanup_tmp_after_lock()
     failures = {}  # update_id -> consecutive failures (poison-message guard)
+    _stale_seen = set()  # (uid, offset) already logged to stale.log
     while True:
         token = load_token()
         if not token:
@@ -535,11 +541,16 @@ def main():
                     # log and no sleep. Log it and back off 2s. Do NOT
                     # auto-advance offset here: guard is NOT a bot-change
                     # solution, changing bot requires manual offset reset.
-                    try:
-                        with open(os.path.join(STATE_DIR, "stale.log"), "a", encoding="utf-8") as _sf:
-                            _sf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} stale update_id={uid} offset={offset}\n")
-                    except OSError:
-                        pass
+                    # Same (uid, offset) is logged only once per process
+                    # lifetime, so stale.log does not grow without bound.
+                    _stale_key = (uid, offset)
+                    if _stale_key not in _stale_seen:
+                        _stale_seen.add(_stale_key)
+                        try:
+                            with open(os.path.join(STATE_DIR, "stale.log"), "a", encoding="utf-8") as _sf:
+                                _sf.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} stale update_id={uid} offset={offset}\n")
+                        except OSError:
+                            pass
                     print(f"stale update_id={uid} < offset={offset}, backing off (manual offset reset required if bot changed)",
                           file=sys.stderr, flush=True)
                     time.sleep(2)

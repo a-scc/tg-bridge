@@ -11,7 +11,7 @@
 - `listener.py` —— 轮询 `getUpdates`、发表情回执、下载附件、写收件箱记录和 `state/tg_history.jsonl`（只记用户消息），写 `state/heartbeat` 心跳。
 - `tg_send.py` —— 发文本 / 文件到 Telegram，长文本自动分段，用 `--done <update_id>` 或 `--ack-only <update_id>` 关闭一条收件箱记录（后者只关闭不发送）。关闭时会清掉打字中标记；已经在 `inbox/done/` 的记录保留作归档，只删它下载下来的文件。
 - `tg_pull.py` —— 把收件箱记录里记为 `vps_path` 的文件拉回来，校验大小，并更新记录的 `file_local`。只更新还存在的副本（先找 `inbox/`，再找 `inbox/done/`），绝不复活已删除的记录。
-- `typing_refresher.py` —— 独立进程，**不在** `tg_send.py` 里。有活干时每隔几秒发 `sendChatAction` 打字中。满足任一条件即视为有活：收件箱有文件、claims 有未结，或 `state/typing_active.json` 工作标记存在且未过期。唤醒时检查器创建标记；`tg_send.py --done` / `--ack-only` 清除标记。用 `state/typing.lock` 保证单例。
+- `typing_refresher.py` —— 独立进程，**不在** `tg_send.py` 里。有活干时每隔几秒发 `sendChatAction` 打字中。满足任一条件即视为有活：收件箱有文件，或 `state/typing_active.json` 工作标记存在且未过期。唤醒时检查器创建标记；`tg_send.py --done` / `--ack-only` 清除标记。用 `state/typing.lock` 保证单例。
 - `predownload.py` —— 分离式、尽力而为的小文件预下载：自动拉取阈值内（含）的 photo / document 记录。失败不改变 VPS 标记。同时只更新还存在的副本（先 `inbox/` 后 `inbox/done/`）。
 - `tg_bridge_check.sh` —— 独立检查器。输出两行：第一行 `WAKE tg-message` / `WAKE deadletter` / `SILENT <原因>`，第二行 JSON。你的轮询器（cron、systemd timer 或 hook 系统）读这两行。轮询间隔由你的轮询器定，不是这个脚本。即使检查器自己崩了，也会输出 `SILENT checker-error` + `{}` 并以 0 退出，所以读两行的轮询器永远不会读到空输出（traceback 走 stderr，留着调试用）。
 

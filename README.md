@@ -55,9 +55,11 @@ next record instead of being blocked by the head of the queue.
   part in delivery: they are moved to state/failed/ once and logged
   once to state/hook-errors.log. Rapid messages sharing a `batch_id`
   are coalesced: the batch wakes once, when it closes (10 messages or
-  20s + 5s drain after the first landed), as `WAKE tg-batch` with `batch_id`,
+  `TG_BATCH_WINDOW_SECS` + `TG_BATCH_DRAIN_SECS` after the first landed,
+  default 20s + 5s), as `WAKE tg-batch` with `batch_id`,
   `records[]` and `inbox_files[]`; a lone message keeps the single
-  `WAKE tg-message` format (after the same wait). Records left in
+  `WAKE tg-message` format (after the same wait; set both to `0` for
+  wake-on-sight, see "延迟调优" in DEPLOYMENT_KEEPALIVE.md). Records left in
   `inbox/done/` unclosed get one `WAKE unclosed-timeout` re-wake
   (10min after wake, typing marker gone/stale); a second timeout only
   logs an alert.
@@ -75,6 +77,8 @@ next record instead of being blocked by the head of the queue.
 | `TG_BRIDGE_DRY_RUN` | `1` = checker dry run, do not move records | unset |
 | `TG_TYPING_INTERVAL_SECS` | Typing refresh interval, in seconds | `4` |
 | `TG_TYPING_MAX_MINUTES` | Typing hard cap, in minutes | `35` |
+| `TG_BATCH_WINDOW_SECS` | Batch coalescing window, in seconds; `0` = wake on sight | `20` |
+| `TG_BATCH_DRAIN_SECS` | Drain after window close, in seconds; set `0` with window | `5` |
 | `TG_SFTP_HOST`, `TG_SFTP_PORT`, `TG_SFTP_USER`, `TG_SFTP_KEY` | SFTP pull for `tg_pull.py` | unset |
 
 Defaults above are fallbacks, not fixed caps: set the environment

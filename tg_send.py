@@ -8,8 +8,8 @@ Usage:
   tg_send.py --ack-only <update_id>          # close an inbox item without sending
 
 Sends plain text (no parse mode), splitting at 4096 chars on newline
-boundaries when possible. On successful send with --done, removes the
-inbox file. Token from .bot_token (600).
+boundaries when possible. On successful send with --done, archives the
+inbox record to inbox/done/closed/ (not deleted). Token from .bot_token (600).
 Bot API base: TG_API_BASE_URL env, default https://api.telegram.org;
 set it to a local Bot API server (e.g. http://localhost:PORT via an SSH
 tunnel) to send via that server instead. Local uploads stream the file

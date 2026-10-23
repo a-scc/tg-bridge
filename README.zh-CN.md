@@ -13,7 +13,7 @@
 - `tg_pull.py` —— 把收件箱记录里记为 `vps_path` 的文件拉回来，校验大小，并更新记录的 `file_local`。只更新还存在的副本（先找 `inbox/`，再找 `inbox/done/`），绝不复活已删除的记录。SFTP 用 `BatchMode=yes`：目标 host key 必须已在 `~/.ssh/known_hosts` 里，首次向新机器拉取前先手动连一次（或 `ssh-keyscan` 预种）。
 - `typing_refresher.py` —— 独立进程，**不在** `tg_send.py` 里。有活干时每隔几秒发 `sendChatAction` 打字中。满足任一条件即视为有活：收件箱有文件，或 `state/typing_active.json` 工作标记存在且未过期。唤醒时检查器创建标记；`tg_send.py --done` / `--ack-only` 清除标记。用 `state/typing.lock` 保证单例。
 - `predownload.py` —— 分离式、尽力而为的小文件预下载。本地模式（`vps_path` 记录）：阈值内（含）的 photo / document / video / voice / audio / video_note / animation；云端模式（`file_id` 记录）：同样类型、20MB 硬顶（Telegram 上限），走 getFile + `/file/` 下载。失败不改变记录。同时只更新还存在的副本（先 `inbox/` 后 `inbox/done/`）。
-- `tg_bridge_check.sh` —— 独立检查器。输出两行：第一行 `WAKE tg-message` / `WAKE deadletter` / `SILENT <原因>`，第二行 JSON。你的轮询器（cron、systemd timer 或 hook 系统）读这两行。轮询间隔由你的轮询器定，不是这个脚本。即使检查器自己崩了，也会输出 `SILENT checker-error` + `{}` 并以 0 退出，所以读两行的轮询器永远不会读到空输出（traceback 走 stderr，留着调试用）。`inbox/` 里非数字命名的 `.json` 不参与投递：会被移入 `state/failed/` 一次，并在 `state/hook-errors.log` 里记一条。同 `batch_id` 的连发消息会合并：批关闭时（满 10 条，或首条落盘 20 秒 + 5 秒 drain 后）只唤醒一次，第一行 `WAKE tg-batch`，第二行带 `batch_id`、`records` 数组、`inbox_files` 数组；单条消息保持 `WAKE tg-message` 单对象格式（同样要等关闭窗口）。`inbox/done/` 里没被关闭的记录会收到一次 `WAKE unclosed-timeout` 重唤（唤醒 10 分钟后、打字标记已过期或不存在）；第二次超时只记告警不再重唤。
+- `tg_bridge_check.sh` —— 独立检查器。输出两行：第一行 `WAKE tg-message` / `WAKE tg-batch` / `WAKE deadletter` / `WAKE unclosed-timeout` / `SILENT <原因>`，第二行 JSON。你的轮询器（cron、systemd timer 或 hook 系统）读这两行。轮询间隔由你的轮询器定，不是这个脚本。即使检查器自己崩了，也会输出 `SILENT checker-error` + `{}` 并以 0 退出，所以读两行的轮询器永远不会读到空输出（traceback 走 stderr，留着调试用）。`inbox/` 里非数字命名的 `.json` 不参与投递：会被移入 `state/failed/` 一次，并在 `state/hook-errors.log` 里记一条。同 `batch_id` 的连发消息会合并：批关闭时（满 10 条，或首条落盘 20 秒 + 5 秒 drain 后）只唤醒一次，第一行 `WAKE tg-batch`，第二行带 `batch_id`、`records` 数组、`inbox_files` 数组；单条消息保持 `WAKE tg-message` 单对象格式（同样要等关闭窗口）。`inbox/done/` 里没被关闭的记录会收到一次 `WAKE unclosed-timeout` 重唤（唤醒 10 分钟后、打字标记已过期或不存在）；第二次超时只记告警不再重唤。
 
 ## 配置（全走环境变量，代码里不写死任何值）
 
@@ -23,13 +23,14 @@
 | `TG_API_BASE_URL` | Bot API 地址，云端或本地 Bot API 服务器 | `https://api.telegram.org` |
 | `TG_API_LOCAL` | `1` = 本地 Bot API，绕过出口代理 | 未设置 |
 | `TG_AUTO_PULL_MAX_MB` | 自动拉取阈值，单位 MB | `50` |
+| `TG_LONGPOLL_TIMEOUT` | getUpdates 长轮询服务器等待，秒；HTTP 客户端超时恒为该值 +20 | `50` |
 | `TG_BRIDGE_DIR` | 桥目录（检查器用） | 检查器脚本所在目录 |
 | `TG_BRIDGE_DRY_RUN` | `1` = 检查器试运行，不搬记录 | 未设置 |
 | `TG_TYPING_INTERVAL_SECS` | 打字中刷新间隔，秒 | `4` |
 | `TG_TYPING_MAX_MINUTES` | 打字中硬上限，分钟 | `35` |
 | `TG_SFTP_HOST`、`TG_SFTP_PORT`、`TG_SFTP_USER`、`TG_SFTP_KEY` | `tg_pull.py` 的 SFTP 拉取 | 未设置 |
 
-默认值只是兜底，不是写死的上限：改环境变量即可。记录里的自动拉取阈值（`auto_pull_max`，listener 写入）优先于环境变量，同一条记录以后拉取时沿用当初记录的阈值。
+默认值只是兜底，不是写死的上限：改环境变量即可。记录里的自动拉取阈值（`auto_pull_max`，listener 写入）优先于环境变量，同一条记录以后拉取时沿用当初记录的阈值。看门狗心跳 stale 阈值 = 2 倍以上 ×（`TG_LONGPOLL_TIMEOUT` + 20）；默认 50 秒长轮询下约 150 秒。改这个值时阈值跟着重算，见 `DEPLOYMENT_KEEPALIVE.md`。
 
 ## 部署
 

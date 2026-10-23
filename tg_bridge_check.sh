@@ -81,8 +81,20 @@ _DONE = os.path.join(INBOX, "done")
 # that arrived inside the window but landed just after is not cut off).
 # A same-batch file landing after close is delivered best-effort as a
 # single. Files without batch_id (or unreadable) are singles.
-BATCH_WINDOW = 20
-BATCH_DRAIN = 5
+#
+# Tunable via environment (see DEPLOYMENT_KEEPALIVE.md "延迟调优"):
+# TG_BATCH_WINDOW_SECS / TG_BATCH_DRAIN_SECS. Defaults preserve the
+# original 20s/5s behavior. Set both to 0 for minimum-latency personal
+# deployments (checker wakes on sight, no batch wait).
+def _env_int(name, default):
+    try:
+        return max(0, int(os.environ.get(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+BATCH_WINDOW = _env_int("TG_BATCH_WINDOW_SECS", 20)
+BATCH_DRAIN = _env_int("TG_BATCH_DRAIN_SECS", 5)
 BATCH_MAX = 10
 
 def _move_to_done(fname):

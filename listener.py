@@ -79,30 +79,49 @@ def _spawn_typing_refresher(chat_id):
         script = os.path.join(BASE_DIR, "typing_refresher.py")
         if os.path.isfile(script):
             _logf = open(os.path.join(STATE_DIR, "typing_spawn.log"), "a", encoding="utf-8")
-            subprocess.Popen([sys.executable, script, "--chat-id", str(chat_id)],
-                             stdout=_logf, stderr=_logf,
-                             start_new_session=True)
+            try:
+                subprocess.Popen([sys.executable, script, "--chat-id", str(chat_id)],
+                                 stdout=_logf, stderr=_logf,
+                                 start_new_session=True)
+            finally:
+                # Parent closes its copy; the child inherited its own fd.
+                _logf.close()
     except Exception:
         pass
 
 def _spawn_predownload(inbox_path, rec):
-    # Predownload: photo/document, at or below the auto-pull threshold.
-    # Detached, best-effort, failure leaves the Bot API host marker unchanged.
-    # Large files above the threshold are NOT predownloaded, Bot API host direct send only.
+    # Predownload: detached, best-effort. Two modes, each with its own cap:
+    # local mode (vps_path set): auto_pull_max, default 50MB;
+    # cloud mode (file_id set, no vps_path): 20MB hard cap (Telegram limit).
+    # Failure leaves the record unchanged; the message is still delivered.
     try:
         import subprocess
-        sz = rec.get("file_size")
-        if rec.get("kind") not in ("photo", "document"):
+        if rec.get("kind") not in ("photo", "document", "video", "voice",
+                                   "audio", "video_note", "animation"):
             return
-        _max = rec.get("auto_pull_max") or TG_AUTO_PULL_MAX
-        if sz is None or sz > _max:
+        if rec.get("file_local"):
+            return  # already downloaded
+        sz = rec.get("file_size")
+        if sz is None:
+            return
+        if rec.get("vps_path"):
+            _max = rec.get("auto_pull_max") or TG_AUTO_PULL_MAX
+        elif rec.get("file_id"):
+            _max = 20 * 1024 * 1024  # Telegram cloud download hard cap
+        else:
+            return  # nothing to pull
+        if sz > _max:
             return
         script = os.path.join(BASE_DIR, "predownload.py")
         if os.path.isfile(script):
             _logf = open(os.path.join(STATE_DIR, "predownload_spawn.log"), "a", encoding="utf-8")
-            subprocess.Popen([sys.executable, script, inbox_path],
-                             stdout=_logf, stderr=_logf,
-                             start_new_session=True)
+            try:
+                subprocess.Popen([sys.executable, script, inbox_path],
+                                 stdout=_logf, stderr=_logf,
+                                 start_new_session=True)
+            finally:
+                # Parent closes its copy; the child inherited its own fd.
+                _logf.close()
     except Exception:
         pass
 # Owner ID: TG_OWNER_ID env var is REQUIRED.
@@ -369,35 +388,43 @@ def handle_update(token, upd):
         "entities": msg.get("entities") or msg.get("caption_entities"),
     }
     file_id = None
+    file_size = None
     if msg.get("text"):
         rec["kind"] = "text"
     elif msg.get("photo"):
         rec["kind"] = "photo"
         file_id = msg["photo"][-1]["file_id"]
+        file_size = msg["photo"][-1].get("file_size")
         rec["file_name"] = f"{uid}.jpg"
     elif msg.get("document"):
         rec["kind"] = "document"
         file_id = msg["document"]["file_id"]
+        file_size = msg["document"].get("file_size")
         rec["file_name"] = safe_file_name(uid, msg["document"].get("file_name"), "file")
     elif msg.get("voice"):
         rec["kind"] = "voice"
         file_id = msg["voice"]["file_id"]
+        file_size = msg["voice"].get("file_size")
         rec["file_name"] = f"{uid}.ogg"
     elif msg.get("video"):
         rec["kind"] = "video"
         file_id = msg["video"]["file_id"]
+        file_size = msg["video"].get("file_size")
         rec["file_name"] = f"{uid}.mp4"
     elif msg.get("audio"):
         rec["kind"] = "audio"
         file_id = msg["audio"]["file_id"]
+        file_size = msg["audio"].get("file_size")
         rec["file_name"] = safe_file_name(uid, msg["audio"].get("file_name"), "audio.mp3")
     elif msg.get("video_note"):
         rec["kind"] = "video_note"
         file_id = msg["video_note"]["file_id"]
+        file_size = msg["video_note"].get("file_size")
         rec["file_name"] = f"{uid}.mp4"
     elif msg.get("animation"):
         rec["kind"] = "animation"
         file_id = msg["animation"]["file_id"]
+        file_size = msg["animation"].get("file_size")
         rec["file_name"] = f"{uid}.mp4"
     elif msg.get("sticker"):
         rec["kind"] = "sticker"
@@ -434,6 +461,10 @@ def handle_update(token, upd):
     else:
         rec["quoted"] = None
     if file_id:
+        rec["file_id"] = file_id
+        if file_size is not None:
+            rec["file_size"] = file_size
+    if file_id and is_local():
         dest = os.path.join(FILES_DIR, rec["file_name"])
         try:
             download_file(token, file_id, dest)
@@ -445,9 +476,11 @@ def handle_update(token, upd):
             if vps_path:
                 rec["file_local"] = None
                 rec["vps_path"] = vps_path
-                rec["file_size"] = getattr(e, "file_size", None)
+                _esz = getattr(e, "file_size", None)
+                if _esz is not None:
+                    rec["file_size"] = _esz
                 rec["auto_pull_max"] = TG_AUTO_PULL_MAX
-                _sz = getattr(e, "file_size", None)
+                _sz = rec.get("file_size")
                 if _sz is not None and _sz <= TG_AUTO_PULL_MAX:
                     _note = f"\n[attachment on VPS: {vps_path} - run tg_pull.py to pull (<={int(TG_AUTO_PULL_MAX//1024//1024)}MB)]"
                 else:
@@ -455,18 +488,30 @@ def handle_update(token, upd):
                 rec["text"] = (rec["text"] + _note).strip()
             else:
                 rec["text"] = (rec["text"] + f"\n[attachment download failed: {e}]").strip()
+    elif file_id:
+        # Cloud mode: never download synchronously here. A 300s /file/
+        # fetch would block the single-thread poll loop. predownload
+        # (detached) fetches it via getFile + /file/ instead.
+        rec["text"] = (rec["text"] + "\n[attachment pending cloud download]").strip()
     tmp = os.path.join(INBOX_DIR, f"{uid}.json.tmp")
     final = os.path.join(INBOX_DIR, f"{uid}.json")
-    _bid, _bcnt = _batch_id(rec.get("chat_id"), time.time())
-    rec["batch_id"] = _bid
-    rec["batch_count"] = _bcnt
+    if edited:
+        # Edited messages never join a batch: independent batch id that
+        # does not consume the running batch's count.
+        rec["batch_id"] = f"edited-{uid}"
+        rec["batch_count"] = 1
+    else:
+        _bid, _bcnt = _batch_id(rec.get("chat_id"), time.time())
+        rec["batch_id"] = _bid
+        rec["batch_count"] = _bcnt
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(rec, f, ensure_ascii=False)
     os.replace(tmp, final)
     _append_history(rec)
     _spawn_typing_refresher(rec["chat_id"])
     _spawn_predownload(final, rec)
-    react(token, rec["chat_id"], rec["message_id"])
+    if not edited:
+        react(token, rec["chat_id"], rec["message_id"])
     return True
 
 

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """Small-file predownload (detached, best-effort).
 
-Given an inbox JSON, if it has vps_path and file_size <= auto-pull
-threshold (default 50MB, same as tg_pull), try to
-pull it now so the main agent sees file_local ready, instead of
-waiting for a manual tg_pull. Failure leaves the Bot API host marker unchanged
-(record text already has the Bot API host note, file_local stays None).
-Large files are NOT predownloaded here: above the threshold goes via Bot API host direct
-send, never via the main-agent host. Files <=50MB are predownloaded in the
-background (detached, sequential per file, never blocking poll);
-a file near the threshold can take minutes over a slow link
-in the background, but text handling is not blocked by it.
-Transport order: same-machine copy first, then tg_pull.py if present.
-All failures are silent (exit 0) - predownload must
+Two modes, each with its own cap:
+- local mode (record has vps_path): file_size <= auto-pull threshold
+  (default 50MB, same as tg_pull). Same-machine copy first, then tg_pull.
+- cloud mode (record has file_id, no vps_path): file_size <= 20MB
+  (Telegram cloud hard cap). getFile + /file/ HTTP download.
+
+Pulls now so the main agent sees file_local ready, instead of
+waiting for a manual tg_pull. Failure leaves the record unchanged
+(file_local stays None); the message itself is still delivered, so a
+failed download never loses the message. Files near the threshold can
+take minutes over a slow link in the background, but text handling is
+not blocked by it. All failures are silent (exit 0) - predownload must
 never block the poll loop or overwrite a marker with an error.
 """
 import json
@@ -21,6 +21,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import urllib.request
 
 # Cap follows the auto-pull threshold, not a separate 5MB guess:
 # record auto_pull_max if present, else TG_AUTO_PULL_MAX_MB env, else 50MB.
@@ -53,6 +54,64 @@ def _log(msg):
         pass
 
 
+def _load_token(base):
+    # .bot_token is 600; refuse to read it if permissions are too open.
+    p = os.path.join(base, ".bot_token")
+    try:
+        if os.stat(p).st_mode & 0o077:
+            _log("refusing: .bot_token permissions too open, should be 600")
+            return None
+        with open(p, encoding="utf-8") as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def _cloud_download(base, file_id, dest, size):
+    """Cloud-mode download: getFile + /file/ HTTP. Returns True on
+    success (size verified), False otherwise. Detached best-effort;
+    failures are silent apart from the predownload log."""
+    token = _load_token(base)
+    if not token:
+        return False
+    api_base = (os.environ.get("TG_API_BASE_URL") or "https://api.telegram.org").rstrip("/")
+    try:
+        req = urllib.request.Request(
+            f"{api_base}/bot{token}/getFile",
+            data=json.dumps({"file_id": file_id}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            info = json.load(r)
+        file_path = info["result"]["file_path"]
+    except Exception as e:
+        _log(f"getFile failed: {e}")
+        return False
+    url = f"{api_base}/file/bot{token}/{file_path}"
+    # Per-operation timeout scales with size; the process is detached,
+    # so a slow link just takes longer instead of blocking the poll loop.
+    try:
+        _to = max(300, int(size / (100 * 1024)) + 120)
+    except Exception:
+        _to = 300
+    tmp = dest + ".tmp"
+    try:
+        with urllib.request.urlopen(url, timeout=_to) as r, open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(tmp, dest)
+        return True
+    except Exception as e:
+        _log(f"cloud /file/ download failed: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def main():
     if len(sys.argv) < 2:
         return 0
@@ -62,18 +121,37 @@ def main():
     except Exception:
         return 0
     vps_path = rec.get("vps_path")
+    file_id = rec.get("file_id")
     size = rec.get("file_size")
-    try:
-        max_bytes = int(rec.get("auto_pull_max") or (int(os.environ.get("TG_AUTO_PULL_MAX_MB", "50")) * 1024 * 1024))
-    except Exception:
-        max_bytes = 50 * 1024 * 1024
-    if not vps_path or size is None or size > max_bytes:
-        return 0
     base = os.path.dirname(os.path.abspath(__file__))
-    dest = os.path.join(base, "inbox", "files", rec.get("file_name", os.path.basename(vps_path)))
-    try:
+    if vps_path:
+        # Local mode: cap follows the auto-pull threshold.
+        try:
+            max_bytes = int(rec.get("auto_pull_max") or (int(os.environ.get("TG_AUTO_PULL_MAX_MB", "50")) * 1024 * 1024))
+        except Exception:
+            max_bytes = 50 * 1024 * 1024
+        if size is None or size > max_bytes:
+            return 0
+        dest = os.path.join(base, "inbox", "files", rec.get("file_name", os.path.basename(vps_path)))
+        _cloud_done = False
+    elif file_id and not rec.get("file_local"):
+        # Cloud mode: 20MB hard cap (Telegram limit), never auto_pull_max.
+        if size is None or size > 20 * 1024 * 1024:
+            return 0
+        dest = os.path.join(base, "inbox", "files", rec.get("file_name", file_id))
+        # Directory must exist before _cloud_download opens dest.tmp.
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if os.path.isfile(vps_path):
+        _cloud_done = _cloud_download(base, file_id, dest, size)
+        if not _cloud_done:
+            _log(f"cloud download failed {inbox}")
+            return 0
+    else:
+        return 0
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    try:
+        if _cloud_done:
+            pass  # cloud already downloaded above; go to size check
+        elif os.path.isfile(vps_path):
             shutil.copyfile(vps_path, dest)
         else:
             # Try tg_pull (same-machine / SFTP env)

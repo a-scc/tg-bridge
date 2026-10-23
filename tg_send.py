@@ -255,44 +255,10 @@ def split_text(text, limit=4096):
     return chunks
 
 
-def mark_done(update_id):
-    # Clear typing work marker, regardless of where the
-    # record lives. Checker wake creates state/typing_active.json, main
-    # agent reply (tg_send --done / --ack-only) clears it. This is the
-    # refresher stop signal.
+def _delete_attachment(rec):
+    # Remove the downloaded attachment, if it really lives under
+    # inbox/files/. Anything else in the record is left alone.
     try:
-        _marker = os.path.join(STATE_DIR, "typing_active.json")
-        _m = json.load(open(_marker, encoding="utf-8"))
-        if str(_m.get("update_id")) == str(update_id):
-            os.remove(_marker)
-    except Exception:
-        pass
-    path = os.path.join(INBOX_DIR, f"{update_id}.json")
-    # Record may already be in inbox/done/ (checker once-delivery).
-    # In that case, keep the done record as archive, but still delete
-    # its downloaded file_local to avoid disk fill. Do NOT delete done/.
-    _done_path = os.path.join(INBOX_DIR, "done", f"{update_id}.json")
-    if os.path.isfile(_done_path) and not os.path.isfile(path):
-        try:
-            rec = json.load(open(_done_path, encoding="utf-8"))
-            file_local = rec.get("file_local") if isinstance(rec, dict) else None
-            if file_local:
-                real_file = os.path.realpath(file_local)
-                real_files = os.path.realpath(FILES_DIR)
-                if real_file.startswith(real_files + os.sep):
-                    try:
-                        os.remove(real_file)
-                    except OSError:
-                        pass
-        except Exception:
-            pass
-        return
-    # Closing an item also removes its downloaded attachment:
-    # inbox/files/ would otherwise fill the disk over time.
-    # Only delete paths that really live under inbox/files/; anything
-    # else in the record is left alone as a safety guard.
-    try:
-        rec = json.load(open(path, encoding="utf-8"))
         file_local = rec.get("file_local") if isinstance(rec, dict) else None
         if file_local:
             # realpath (not abspath): a symlink inside inbox/files/
@@ -306,8 +272,40 @@ def mark_done(update_id):
                     pass
     except Exception:
         pass
+
+
+def mark_done(update_id):
+    # Clear typing work marker, regardless of where the
+    # record lives. Checker wake creates state/typing_active.json, main
+    # agent reply (tg_send --done / --ack-only) clears it. This is the
+    # refresher stop signal.
     try:
-        os.remove(path)
+        _marker = os.path.join(STATE_DIR, "typing_active.json")
+        _m = json.load(open(_marker, encoding="utf-8"))
+        if str(_m.get("update_id")) == str(update_id):
+            os.remove(_marker)
+    except Exception:
+        pass
+    # Closing leaves an auditable trace: the record moves to
+    # inbox/done/closed/ instead of being deleted. The checker's
+    # unclosed-timeout scan only looks at done/*.json (top level),
+    # so closed records are naturally never re-woken.
+    _closed_dir = os.path.join(INBOX_DIR, "done", "closed")
+    src = None
+    for _p in (os.path.join(INBOX_DIR, f"{update_id}.json"),
+               os.path.join(INBOX_DIR, "done", f"{update_id}.json")):
+        if os.path.isfile(_p):
+            src = _p
+            break
+    if src is None:
+        return  # already closed or never existed
+    try:
+        _delete_attachment(json.load(open(src, encoding="utf-8")))
+    except Exception:
+        pass
+    try:
+        os.makedirs(_closed_dir, exist_ok=True)
+        os.replace(src, os.path.join(_closed_dir, f"{update_id}.json"))
     except OSError:
         pass
 

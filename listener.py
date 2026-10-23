@@ -135,11 +135,17 @@ except ValueError:
     OWNER_ID = 0
 
 # Batch grouping: same chat, within 20s, max 10 messages share a batch_id.
-# Listener does NOT wait 20s for a single message (grace / drain is a
-# checker / agent concern, listener only groups what it already has,
-# so a single message is delivered immediately with batch_count=1).
-# batch_count is ARRIVAL count, not unique message count:
-# an edited message counts again (hook dedups by message_id). Batch
+# The listener only groups what it has already seen: it writes each inbox
+# record immediately (a lone message lands in inbox/ at once with
+# batch_count=1) and never holds messages back to fill a window.
+# The 20s window + 5s drain is enforced on the CHECKER side
+# (tg_bridge_check.sh): a batch is emitted as WAKE only once it is closed
+# (>=10 records, or 20s+5s after the first record landed), so end-to-end
+# a single message is typically delivered ~25s after arrival, not instantly.
+# batch_count is ARRIVAL count, not unique message count.
+# Edited messages never join the arrival batch: each edited message gets
+# its own independent batch_id ("edited-<update_id>") and does not consume
+# a slot of the running batch (hook dedups by message_id). Batch
 # state is in-memory only: listener restart resets it, so grouping is
 # best-effort, not a strict guarantee. batch_id now carries a
 # monotonically increasing seq to avoid same-second collisions

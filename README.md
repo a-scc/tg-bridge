@@ -21,32 +21,46 @@ next record instead of being blocked by the head of the queue.
 - `tg_send.py` — sends text / documents to Telegram, splits long text,
   and closes an inbox item with `--done <update_id>` or
   `--ack-only <update_id>` (close without sending). Closing clears
-  the typing work marker; a record already in `inbox/done/` is kept
-  as an archive, only its downloaded file is removed.
+  the typing work marker; the record moves to `inbox/done/closed/`
+  (its downloaded file is removed first).
 - `tg_pull.py` — pulls a file recorded as `vps_path` in an inbox
   record, verifies size, and updates the record's `file_local`.
   It updates only the copy that still exists (`inbox/` first, then
-  `inbox/done/`); it never recreates a missing record.
+  `inbox/done/`); it never recreates a missing record. SFTP runs with
+  `BatchMode=yes`: the target host key must already be in
+  `~/.ssh/known_hosts` — connect once manually (or
+  `ssh-keyscan`) before the first pull to a new host.
 - `typing_refresher.py` — separate process, NOT inside `tg_send.py`.
   Sends `sendChatAction` typing while work is active. It is pending
   while inbox files exist, or the work marker
   `state/typing_active.json` exists and is not stale. The checker
   creates the marker on wake; `tg_send.py --done` / `--ack-only`
   clears it. Singleton via `state/typing.lock`.
-- `predownload.py` — detached, best-effort predownload for
-  photo / document records at or below the auto-pull threshold.
-  Failure leaves the VPS marker unchanged. It also updates only
-  the copy that still exists (`inbox/` first, then `inbox/done/`).
+- `predownload.py` — detached, best-effort predownload.
+  Local mode (`vps_path` records): photo / document / video / voice /
+  audio / video_note / animation at or below the auto-pull threshold.
+  Cloud mode (`file_id` records): same kinds at or below the 20MB
+  Telegram hard cap, fetched via getFile + `/file/`. Failure leaves the record unchanged. It also
+  updates only the copy that still exists (`inbox/` first, then
+  `inbox/done/`).
 - `tg_bridge_check.sh` — standalone checker. It prints two lines:
-  line 1 `WAKE tg-message` / `WAKE deadletter` / `SILENT <reason>`,
-  line 2 JSON payload. Your poller (cron, systemd timer, or a hook
-  system) reads those lines. Poll interval is set by your poller,
-  not by this script. Even if the checker itself crashes, it still
-  prints `SILENT checker-error` + `{}` and exits 0, so a poller
-  reading two lines never reads an empty stdout (the traceback,
-  if any, goes to stderr for debugging). Non-numeric .json files in
-  inbox/ never take part in delivery: they are moved to state/failed/
-  once and logged once to state/hook-errors.log.
+  line 1 `WAKE tg-message` / `WAKE tg-batch` / `WAKE deadletter` /
+  `WAKE unclosed-timeout` / `SILENT <reason>`, line 2 JSON payload.
+  Your poller (cron, systemd timer, or a hook system) reads those
+  lines. Poll interval is set by your poller, not by this script.
+  Even if the checker itself crashes, it still prints
+  `SILENT checker-error` + `{}` and exits 0, so a poller reading two
+  lines never reads an empty stdout (the traceback, if any, goes to
+  stderr for debugging). Non-numeric .json files in inbox/ never take
+  part in delivery: they are moved to state/failed/ once and logged
+  once to state/hook-errors.log. Rapid messages sharing a `batch_id`
+  are coalesced: the batch wakes once, when it closes (10 messages or
+  20s + 5s drain after the first landed), as `WAKE tg-batch` with `batch_id`,
+  `records[]` and `inbox_files[]`; a lone message keeps the single
+  `WAKE tg-message` format (after the same wait). Records left in
+  `inbox/done/` unclosed get one `WAKE unclosed-timeout` re-wake
+  (10min after wake, typing marker gone/stale); a second timeout only
+  logs an alert.
 
 ## Configuration (all via environment, no values are fixed in code)
 

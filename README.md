@@ -70,6 +70,7 @@ next record instead of being blocked by the head of the queue.
 | `TG_API_BASE_URL` | Bot API base, cloud or local Bot API server | `https://api.telegram.org` |
 | `TG_API_LOCAL` | `1` = local Bot API, bypass the egress proxy | unset |
 | `TG_AUTO_PULL_MAX_MB` | Auto-pull threshold, in MB | `50` |
+| `TG_LONGPOLL_TIMEOUT` | getUpdates long-poll server wait, in seconds; HTTP client timeout is always this value + 20 | `50` |
 | `TG_BRIDGE_DIR` | Directory containing these files, for the checker | directory of the checker script |
 | `TG_BRIDGE_DRY_RUN` | `1` = checker dry run, do not move records | unset |
 | `TG_TYPING_INTERVAL_SECS` | Typing refresh interval, in seconds | `4` |
@@ -80,7 +81,10 @@ Defaults above are fallbacks, not fixed caps: set the environment
 variables to change them. The auto-pull threshold in a record
 (`auto_pull_max`, written by the listener) wins over the environment
 for that record, so a record pulled later still uses the threshold
-it was recorded with.
+it was recorded with. Watchdog heartbeat-stale threshold = 2x or more
+of (`TG_LONGPOLL_TIMEOUT` + 20); with the default 50s long-poll that
+is ~150s. Recalculate the threshold when you change the timeout;
+see `DEPLOYMENT_KEEPALIVE.md`.
 
 ## Setup
 

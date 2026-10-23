@@ -134,6 +134,21 @@ try:
 except ValueError:
     OWNER_ID = 0
 
+# Long-poll tuning: TG_LONGPOLL_TIMEOUT sets the getUpdates server-side
+# wait, in seconds (default 50, the keepalive profile's recommended
+# default). The HTTP client timeout is always server timeout + 20s.
+# Override the env var when the network kills long-lived TLS connections
+# (e.g. some egress proxies cut connections held longer than ~20-30s).
+# Invalid values fall back to 50. When you change this, recalculate the
+# watchdog heartbeat-stale threshold as: 2x or more of
+# (server timeout + 20). See DEPLOYMENT_KEEPALIVE.md.
+try:
+    LONGPOLL_TIMEOUT = int(os.environ.get("TG_LONGPOLL_TIMEOUT", "50") or 50)
+    if LONGPOLL_TIMEOUT <= 0:
+        raise ValueError("non-positive long-poll timeout")
+except ValueError:
+    LONGPOLL_TIMEOUT = 50
+
 # Batch grouping: same chat, within 20s, max 10 messages share a batch_id.
 # The listener only groups what it has already seen: it writes each inbox
 # record immediately (a lone message lands in inbox/ at once with
@@ -579,9 +594,9 @@ def main():
             offset = read_offset()
             resp = api(token, "getUpdates", {
                 "offset": offset,
-                "timeout": 50,
+                "timeout": LONGPOLL_TIMEOUT,
                 "allowed_updates": ["message", "edited_message"],
-            }, timeout=70)
+            }, timeout=LONGPOLL_TIMEOUT + 20)
             for upd in resp.get("result", []):
                 uid = upd.get("update_id")
                 # Stale guard: if bot changed, Telegram may re-send

@@ -7,7 +7,8 @@
 # Standalone: this script does NOT depend on any host hook runtime.
 # It prints two lines to stdout and exits 0, even on a checker
 # crash (then: SILENT checker-error + {}):
-#   line 1: WAKE tg-message | WAKE deadletter | SILENT <reason>
+#   line 1: WAKE tg-message | WAKE tg-batch | WAKE deadletter |
+#           WAKE unclosed-timeout | SILENT <reason>
 #   line 2: JSON payload
 # Your poller (cron, systemd timer, or a hook system) reads those
 # lines and decides what to do. Poll interval is set by your poller,

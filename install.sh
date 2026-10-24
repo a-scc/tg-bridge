@@ -14,6 +14,13 @@
 #   TG_OWNER_ID          你的 TG 数字 id (装 systemd 服务时必填)
 #   TG_INSTALL_SYSTEMD   1=装 0=不装    (默认 auto: 终端下询问, 管道下不装)
 #
+# 参数:
+#   --force   自检没过也继续装(只该在"只装代码、先不启用服务"时用)
+#
+# 安装前会真验一遍 helper(不是只看文件在不在): 离线查 5 个子命令认不认,
+# 没有桥在跑时再真打一次 getUpdates。不通过直接中止、什么都不装 ——
+# 否则会装出一个 systemd 显示 active、实际一条消息都捡不到的"活死人"。
+#
 # 本脚本只装代码 + 服务单元。Bot Token 由连接器提供, Hatch hook 在 Hatch 侧配置, 都不在仓库里。
 set -euo pipefail
 
@@ -55,20 +62,89 @@ PYTHON="$(command -v python3)"
 [ -f "$TG_HELPER" ] || die "找不到连接器: $TG_HELPER
   本仓库不含 tg.py (Bot Token 不落盘, 由 Secure Vault 提供)。
   请先配好 custom.telegram 连接器, 或用 TG_HELPER=/path/to/tg.py 指定。"
-# 自检 helper 认不认我们依赖的子命令。不认的话后果是分层的:
-#   poller 起不来(exit 2) / finish 永远 send_failed / claim 附件全失败 / typing 静默失效。
-# 只告警不中止 —— 也可能只是个换了措辞的适配器。
-_missing=""
-_help="$(python3 "$TG_HELPER" --help 2>&1 || true)"
-for _v in getupdates react typing download send; do
-  printf '%s' "$_help" | grep -q "$_v" || _missing="$_missing $_v"
-done
-if [ -n "$_missing" ]; then
-  say "⚠️  helper 的 --help 里没看到:$_missing"
-  say "    先用最要紧的那条验一下:  python3 $TG_HELPER getupdates --timeout 1 --offset 0"
-  say "    返回 {\"ok\": true} 就没事(可能只是 --help 措辞不同);"
-  say "    返回 invalid choice 才是真的指错了文件 → 改 TG_HELPER 重跑。"
+# ---- helper 自检: 两道探针, 目的只有一个 —— 别装出一个"活死人" ----
+# 症状: systemd 看是 active, 日志里全是 poll error, 一条消息都捡不到。
+# 原因: helper 不认 getupdates/send 这些子命令, 而只查"文件在不在"是查不出来的。
+#
+# 探针 1 (离线, 必做): 给每个子命令塞一个不存在的参数。
+#   argparse 对"子命令不存在"报 invalid choice; 对"子命令存在但参数不认识"报
+#   unrecognized arguments。所以看到 invalid choice 就是缺这个命令。
+#   不联网、不发消息、不和 poller 抢 getUpdates。
+# 探针 2 (联网, 有条件): 真打一次 getupdates --timeout 1 --offset 0。
+#   只有当前没有桥在跑时才做 —— 否则会和它抢同一个 bot, 把正在跑的那个打成 409。
+#   offset=0 不会确认任何待处理消息, 真 poller 之后照拿不误。
+# 找真正的旧 listener 进程。不能只 pgrep -f 'listener\.py':
+# 那样连"命令行里提到 listener.py"的 shell/pgrep 自己都会命中, 造成误判。
+# 这里要求命令的第一个 token 是 python* —— 真进程长这样: python3 /path/listener.py
+_legacy_listeners() {
+  command -v pgrep >/dev/null 2>&1 || return 0
+  pgrep -af 'listener\.py' 2>/dev/null | awk '$2 ~ /^[^ ]*python[0-9.]*$/ {print $1}' | tr '\n' ' '
+}
+
+_py() {   # 带超时跑 helper: 有些 argparse 用 parse_known_args, 塞假参数它不报错而是真去
+          # 长轮询(默认 50 秒)。这里封顶 10 秒, 免得自检自己卡住。
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 python3 "$@"
+  else
+    python3 "$@"
+  fi
+}
+
+_helper_offline() {
+  _bad=""
+  for _v in getupdates react typing download send; do
+    _out="$(_py "$TG_HELPER" "$_v" --__tg_probe__ 1 2>&1)" || true
+    case "$_out" in
+      *"invalid choice"*) _bad="$_bad $_v" ;;
+    esac
+  done
+  [ -z "$_bad" ]
+}
+
+_helper_live() {
+  _rc=0
+  _out="$(_py "$TG_HELPER" getupdates --timeout 1 --offset 0 2>&1)" || _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    say "      rc=$_rc  $(printf '%s' "$_out" | tail -2 | tr '\n' ' ')"
+    return 1
+  fi
+  if ! printf '%s' "$_out" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+    say "      输出: $(printf '%s' "$_out" | tail -2 | tr '\n' ' ')"
+    return 1
+  fi
+  return 0
+}
+
+_probe_fail() {   # $1 = 说明
+  if [ "$FORCE" = "1" ]; then
+    say "  ⚠️  $1"
+    say "      --force: 继续安装, 但桥很可能起不来。"
+  else
+    die "$1
+
+  helper 不通 = poller 卡在 getUpdates 空转 / finish 永远 send_failed / claim 附件全失败。
+  先自查:  python3 $TG_HELPER getupdates --timeout 1 --offset 0
+  返回 {\"ok\": true} 才算通。路径不对就改 TG_HELPER 重跑。
+  明知不可用仍要装(只装代码不启用服务):  bash install.sh --force"
+  fi
+}
+
+if ! _helper_offline; then
+  _probe_fail "helper 不认这些子命令:$_bad"
 fi
+
+# 当前有桥在跑就跳过联网探针, 避免抢 getUpdates
+_bridge_live=0
+systemctl is-active --quiet tg-bridge-poller.service >/dev/null 2>&1 && _bridge_live=1
+[ -n "$(_legacy_listeners)" ] && _bridge_live=1
+if [ "$_bridge_live" = "1" ]; then
+  say "      跳过联网自检: 检测到桥还在跑, 现在打 getUpdates 会让它 409"
+else
+  if ! _helper_live; then
+    _probe_fail "helper 的 getupdates 没通过(见上)"
+  fi
+fi
+
 say "[1/5] 依赖检查通过"
 
 # --- 2/5 代码 -------------------------------------------------------------
@@ -152,8 +228,7 @@ if [ "$install_service" = 1 ]; then
     say "      检测到 $UNIT_NAME 已在运行 → 先停再起(避免同一 bot 双轮询 409)"
     $SUDO systemctl stop "$UNIT_NAME" || true
   fi
-  _legacy=""
-  command -v pgrep >/dev/null 2>&1 && _legacy="$(pgrep -f 'listener\.py' 2>/dev/null | tr '\n' ' ' || true)"
+  _legacy="$(_legacy_listeners)"
   # 只认第一列的单元名: 描述列里出现 "tg-bridge" 不算
   _other="$($SUDO systemctl list-units --type=service --all --no-legend 2>/dev/null \
             | awk '{print $1}' | grep -E '^tg-bridge[^ ]*\.service$' \

@@ -7,7 +7,7 @@ Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥捡起来�
 | 依赖 | 说明 |
 |---|---|
 | `python3` + `git` | 安装脚本会检查 |
-| **`tg.py` 连接器** | **不在本仓库**。实际路径 `~/workspace/custom-connectors/custom.telegram/bin/tg.py`，可用 `TG_HELPER=` 覆盖。⚠️ 这个文件虽然住在 `custom.telegram`（看着像旧注册目录），但**它是在用的那个，别删目录**；删了桥立刻起不来 |
+| **`tg.py` 连接器** | **不在本仓库**。实际路径 `~/workspace/custom-connectors/custom.telegram/bin/tg.py`，可用 `TG_HELPER=` 覆盖。`install.sh` 会**真打一次 `getupdates` 验它**，不通过就中止安装。⚠️ 这个文件虽然住在 `custom.telegram`（看着像旧注册目录），但**它是在用的那个，别删目录** |
 | Bot Token | 由 `tg.py` 所在的连接器（Secure Vault）持有，**不落盘、不进日志、不进本仓库** |
 | systemd | 跑 poller；装服务时才需要 |
 | Hatch hook | 每 5 秒调用一次，命令里带上 checker 侧要用的环境变量（见"安装后必须配置"第 4 条）|
@@ -27,6 +27,15 @@ curl -fsSL https://raw.githubusercontent.com/a-scc/tg-bridge/main/install.sh \
 # 已在仓库目录里
 bash install.sh
 ```
+
+**安装前的 helper 自检会拦住"活死人"**：只查文件在不在是不够的——helper 不认 `getupdates` 时，
+systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡不到。所以 `install.sh` 会
+
+1. **离线**给 5 个子命令各塞一个假参数：argparse 报 `invalid choice` 就是缺这个命令（不联网、不发消息）；
+2. 当前**没有桥在跑**时，再**真打一次** `getupdates --timeout 1 --offset 0`，必须返回 `{"ok": true}`。
+   `offset=0` 不会确认任何待处理消息，真 poller 之后照拿不误；有桥在跑时跳过这一步，免得把它打成 409。
+
+任一不通过就中止，**什么都不装**（连 clone 都不做）。确实只想装代码不启用服务时用 `--force`。
 
 ⚠️ **`curl | bash` 下无法交互**（stdin 是脚本本身，不是终端）。此时 `install.sh` 会明确打印“跳过服务安装”并给出重跑命令，不会假装问过你。
 

@@ -69,6 +69,7 @@ cd "$INSTALL_DIR"
 # checker 会被 Hatch hook 调用; 给 +x 后 ./ 与 bash 两种调用方式都能用
 mkdir -p inbox/done/closed inbox/processing inbox/files state/sent
 chmod +x tg_claim.sh tg_finish.sh tg_bridge_check.sh
+git config core.fileMode false          # ← 新增: 权限位变化不再算本地改动
 say "[3/5] 运行时目录与可执行位就绪"
 
 # --- 4/5 systemd ----------------------------------------------------------

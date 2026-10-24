@@ -30,20 +30,24 @@ bash ~/workspace/tg-bridge-deploy/tg_claim.sh
 |---|---|---|
 | `claimed` | 已原子认领，可以回复 | 继续第 2 步 |
 | `already_processed` | `closed/` 里已有 → 这是被压掉后迟到的唤醒 | **nothing_to_do**，主聊天保持安静 |
-| `overlapped` | 另一个 handler 正在跑，新到的已并入它那批 | **nothing_to_do**，不要重复回复 |
 | `nothing_to_do` | 没东西可处理 | 安静 |
 | `bad_args` | 参数错 | 安静（记进日志） |
 
-`claimed` 时 JSON 里有你要的全部信息：`records`（每条消息的 `text`/`kind`/`file_size`/`quoted`）、
-`attachments`（**已下好**，带 `local_path`，直接查看）、`over_cap`（超 20MB，没下）、
-`attachment_errors`（下载失败，但消息不丢）、`chat_id`、`batch_key`。
+`claimed` 时 JSON 里有你要的全部信息：`claim_id`（**第 2 步必须带上**，它标记这批归你）、
+`records`（每条消息的 `text`/`kind`/`file_size`/`quoted`）、`attachments`（**已下好**，带
+`local_path`，直接查看）、`over_cap`（超 20MB，没下）、`attachment_errors`（下载失败，但消息不丢）、
+`chat_id`、`claimed_uids`。
+
+`claim_id` 是这批的归属凭证：`tg_finish.sh` 只归档这个 id 名下的 uid，`processing/` 里别人的
+记录一个字都不动。**两个 handler 同时跑也不会互相吞掉对方的消息。**
 
 ### 第 2 步：回复 + 收尾（一条命令）
 
 正文用 heredoc 直给，**不要**再经过 shell 参数传文本（避免转义事故）：
 
 ```bash
-bash ~/workspace/tg-bridge-deploy/tg_finish.sh --chat-id <chat_id> --stdin <<'TGEOF'
+bash ~/workspace/tg-bridge-deploy/tg_finish.sh \
+  --chat-id <chat_id> --claim-id <claim_id> --stdin <<'TGEOF'
 （这里是回复正文，简体中文、亲昵自然、简短，一批只回一条）
 TGEOF
 ```
@@ -63,18 +67,25 @@ TGEOF
 ## 已内置的保护（不需要你手动做）
 
 - **幂等**：以 `inbox/done/closed/<update_id>.json` 为准。重复唤醒不会二次回复。
-- **重叠唤醒**：`processing/` 里有活文件 = 上一个 handler 还在跑 → 新消息并进去，本进程直接退。
-- **死 handler 接管**：`processing/` 滞留超过 `TG_PROC_STALE_SECS`（默认 300 秒）视为上一个
-  handler 已死，接管这批。**这一条是必须的**：`processing/` 不在 poller / checker / typing_loop
-  任何一条扫描路径里，没有它，handler 一崩消息就永久失踪。
+- **归属隔离**：`claim` 把本批 uid 写进 `state/claim/<claim_id>.json`，`finish` 只归档这批。
+  别人的批（包括同时跑着的另一个 handler）**完全不碰**。新消息不会被塞进别人的批里当赡养费。
+- **死 handler 接管**：`processing/` 里的批**全部**超过 `TG_PROC_STALE_SECS`（默认 1800 秒）
+  视为 handler 已死，下一次 claim 接管。`processing/` 不在 poller / checker / typing_loop 任何
+  扫描路径里，没有这条兜底，handler 一崩消息就永久失踪。
+  运维要立刻接管用 `tg_claim.sh --takeover`（只抢**没有归属记录**的孤儿文件；
+  有 fresh 归属记录的活批即使加了 --takeover 也不会被抢）。
 - **发送失败不归档**：避免"发出去了但没记录"或"记录没了但没发出去"。
-- **发送成功先落哨兵** `state/sent/<batch_key>.json` 再归档：归档失败重跑只会补归档，不会重复发。
+- **分片可续发**：哨兵 `state/sent/<claim_id>.json` 里记着 `sent` 分片下标，每成功一片就落盘。
+  中途失败重跑**从断点续发**，已成功的片不会重发。
 - **超长分片**：单条 >3900 字自动切分（优先切在换行处），避免 TG 4096 上限直接拒收导致整段回复丢失。
 
 ## 竞态说明
 
 - checker 可能在 `claim` 的 listdir 与 mv 之间把文件从 `inbox/` 搬到 `done/`（或反向）。
   `tg_claim.sh` 会重试另一个位置；两边都没有就记 `vanished`，不阻塞后面的消息。
+- **两个 handler 并行**：各拿各的 `claim_id`，各归档各的批，互不影响。万一你手上没有
+  `claim_id` 而 `state/claim/` 里有多份，`finish` 会拒绝执行并列出待收尾的 id —— 这是故意的，
+  不猜比猜错安全。
 - **不要**手动 `mv` / `rm` 这三个目录里的文件。要重试就原样重跑命令。
 
 ## 红线

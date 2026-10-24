@@ -48,18 +48,19 @@ bash install.sh
 | `TG_DEFER_WHILE_BUSY_SECS` | 120 | S1 忙时压制：上一批还在处理时不为新消息再起 worker，最坏可让一条消息多等 120s。`0` = 关闭 |
 | `TG_BATCH_GROUP_SECS` | 150 | 批量分组窗口。**只影响 `batch_id` 命名，不影响投递时刻**（checker 的 `BATCH_WINDOW=0` 才是立即投递的开关） |
 | `TG_LONGPOLL_TIMEOUT` | 20 | 长轮询秒数。出口代理会掐 20–30s 的连接，所以别按上游默认的 50 |
-| `TG_PROC_STALE_SECS` | 300 | `processing/` 无心跳多久视为 handler 已死并接管 |
+| `TG_PROC_STALE_SECS` | 1800 | `processing/` 里的批全部超过这个时长才视为 handler 已死并接管（宁可晚救，不抢在跑的批）|
 
 ## 处理流程 (两步)
 
 当前 `HANDLING.md` 是 2 步流程，整条链只有 2 次工具调用：
 
 1. **认领**：`tg_claim.sh --uid <update_id>` (单条) 或 `tg_claim.sh` (批唤醒)
+   返回 `claim_id`，第 2 步必须带上它
    - 幂等检查 (`closed/`) → 原子认领到 `inbox/processing/` → 扫全量 → 附件下载 → 一次输出 JSON
-   - 状态：`claimed` / `already_processed` / `overlapped` / `nothing_to_do` / `bad_args`
+   - 状态：`claimed` / `already_processed` / `nothing_to_do` / `bad_args`
    - `--no-download` 可跳过附件下载，自己处理
 
-2. **回复 + 收尾**：`tg_finish.sh --chat-id <chat_id> --stdin <<'TGEOF'`
+2. **回复 + 收尾**：`tg_finish.sh --chat-id <chat_id> --claim-id <claim_id> --stdin <<'TGEOF'`
    - 发送 (超 3900 字自动分片) → 归档到 `inbox/done/closed/` → 附件一起搬 → 删 `state/typing_active.json`
    - 状态：`closed` / `send_failed` / `nothing_to_do` / `bad_args` / `dry_run`
    - `--dry-run` 只演示不发不归档；发送失败时原样重跑同一条命令即可（不会重复发）
@@ -67,11 +68,15 @@ bash install.sh
 **保护 (已内置，不需手动做)：**
 
 - 幂等：以 `inbox/done/closed/<update_id>.json` 为准，重复唤醒不二次回复
-- 重叠唤醒：`processing/` 里有活文件 = 上一个 handler 还在跑，新消息并进去，本进程直接退
-- 死 handler 接管：`processing/` 滞留超 `TG_PROC_STALE_SECS` (默认 300 秒) 视为已死，接管这批
+- 归属隔离：`claim` 把本批 uid 写进 `state/claim/<claim_id>.json`，`finish` 只归档这批；两个
+  handler 并行也互不吞消息（老版本会把新消息并进别人的批，然后被别人的 finish 顺手归档掉）
+- 死 handler 接管：`processing/` 里的批全部超过 `TG_PROC_STALE_SECS` (默认 1800 秒) 视为已死，
+  下一次 claim 接管；运维要立刻接管用 `tg_claim.sh --takeover`（只抢没有归属记录的孤儿，
+  有 fresh 归属记录的活批不抢）
   —— **这条必须有**：`processing/` 不在 poller/checker/typing 任何扫描路径里，没有它 handler 一崩消息就永久失踪
 - 发送失败不归档：消息留在 `processing/`，可重跑，不丢
-- 发送成功先落哨兵 `state/sent/<batch_key>.json` 再归档：归档失败重跑只补归档，不重复发
+- 分片可续发：哨兵 `state/sent/<claim_id>.json` 记着 `sent` 分片下标，每成功一片就落盘，
+  中途失败重跑从断点续发，已成功的片不重发；全发完但归档失败则只补归档
 
 ## 文件清单
 

@@ -43,6 +43,51 @@ systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡�
 
 安装脚本会：克隆到 `~/workspace/tg-bridge-deploy/` → 建 `inbox/`、`state/`、`inbox/{done/closed,processing,files}`、`state/sent/` → 给三个脚本 `chmod +x` → （可选）注入路径并安装 systemd 单元。
 
+## helper 的 CLI 不是这一套时（适配器）
+
+桥对 helper 的调用约定是固定的 5 个动词：
+
+```
+getupdates --offset N --timeout T      → {"ok":true,"result":[...]}
+react <chat_id> <message_id>
+typing <chat_id>
+download <file_id> <dest_path> --max-bytes N
+send <chat_id> <text>                  → {"ok":true,"result":{"message_id":..}}
+```
+
+而 connector 框架生成的 `tg.py` 可能长这样（2026-10 实测）：
+
+| 桥的动词 | 真实 CLI | 差异 |
+|---|---|---|
+| `getupdates` | `get-updates` | 只是名字 |
+| `send` | `send-message` / `send-long` | 参数从位置改成 `--chat-id --text` |
+| `typing` | `chat-action` | `--action typing` |
+| `react` | `set-reaction` | `--chat-id --message-id` |
+| `download` | `download-file` | **只能给 `--out-dir`，没有 `--max-bytes`** |
+
+这时**不要改 `tg.py`**（它不在版本控制里，重新注册一次别名就没了），也**不要改桥的 5 处调用点**
+（会把仓库钉死在某一个 helper 版本上，而且 `download` 的差异得散在解析逻辑里）。用
+`bin/tg_adapter.py`：
+
+```bash
+TG_HELPER=<安装目录>/bin/tg_adapter.py
+TG_HELPER_REAL=<真实 tg.py 的路径>
+```
+
+适配器做三件事：动词/参数转换、返回 JSON 归一化成 `{"ok":..,"result":..}`、
+以及 `download` 的两个真实差异（下到临时目录再搬到桥要的精确路径、按 `--max-bytes` 判 `over_cap`）。
+
+⚠️ **这两个变量要出现在三个地方**，否则只有一部分进程走适配器：
+
+| 谁 | 怎么设 |
+|---|---|
+| `poller.py`（systemd） | unit 里的 `Environment=TG_HELPER=`（`install.sh` 已自动注入）＋ 自己加一行 `Environment=TG_HELPER_REAL=` |
+| `tg_bridge_check.sh`（hook） | hook 的命令行：`TG_HELPER=.. TG_HELPER_REAL=.. bash .../tg_bridge_check.sh` |
+| `tg_claim.sh` / `tg_finish.sh`（agent shell） | agent 调用前 export，或写进它的 shell 环境 |
+
+`install.sh` 会在装之前真验一遍：只认文件在不在是不够的，helper 不认命令时会装出
+"systemd 显示 active、日志刷 poll error、一条消息都捡不到"的活死人。
+
 ## 安装后必须配置
 
 1. **`TG_OWNER_ID`**：你自己的 Telegram 数字 id（给 `@userinfobot` 发条消息即可）。
@@ -116,6 +161,7 @@ systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡�
 | `install.sh` | 一键安装 |
 | `systemd/tg-bridge-poller.service` | systemd 单元**模板**，占位符由 `install.sh` 注入 |
 | `.gitignore` | 忽略 `inbox/`、`state/`、`.bot_token`、日志 |
+| `bin/tg_adapter.py` | helper CLI 对不上时的翻译层（见上一节）；不用可以删 |
 | `LICENSE` | MIT |
 
 ## 已知限制

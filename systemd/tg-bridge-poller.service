@@ -28,6 +28,8 @@ Environment=TG_BATCH_GROUP_MAX=10
 # 拉起的进程, 不是本服务的子进程 —— 写在这里读不到。要设就写在 hook 的命令行上:
 #   TG_DEFER_WHILE_BUSY_SECS=120 bash <install_dir>/tg_bridge_check.sh
 Environment=TG_OWNER_ID=__TG_OWNER_ID__
+# 本机 helper 的实际路径（可能是 bin/tg_adapter.py）。不注入的话服务会退回代码里的默认值。
+Environment=TG_HELPER=__TG_HELPER__
 EnvironmentFile=-__INSTALL_DIR__/systemd/proxy.env
 Restart=on-failure
 RestartSec=10

@@ -125,6 +125,12 @@ _probe_fail() {   # $1 = 说明
   helper 不通 = poller 卡在 getUpdates 空转 / finish 永远 send_failed / claim 附件全失败。
   先自查:  python3 $TG_HELPER getupdates --timeout 1 --offset 0
   返回 {\"ok\": true} 才算通。路径不对就改 TG_HELPER 重跑。
+
+  如果本机 helper 的 CLI 是另一套词表(例如 get-updates / send-message / chat-action),
+  用仓库自带的适配器, 不用改桥也不用改 helper:
+      TG_HELPER=<安装目录>/bin/tg_adapter.py  TG_HELPER_REAL=<真实 helper 路径>
+  适配器只翻译动词/参数/返回 JSON。先 --force 把代码装下来, 再按上面两个变量重跑。
+
   明知不可用仍要装(只装代码不启用服务):  bash install.sh --force"
   fi
 }
@@ -215,6 +221,7 @@ if [ "$install_service" = 1 ]; then
       -e "s|__INSTALL_DIR__|$INSTALL_DIR|g" \
       -e "s|__PYTHON__|$PYTHON|g" \
       -e "s|__TG_OWNER_ID__|$owner|g" \
+      -e "s|__TG_HELPER__|$TG_HELPER|g" \
       "systemd/$UNIT_NAME" > "$_unit"
   # 有占位符没替换掉就拒绝安装 —— 半填的 unit 起不来, 还会把错误藏进 journal
   if grep -q '__[A-Z_]*__' "$_unit"; then
@@ -272,3 +279,8 @@ say "     TG_PROC_STALE_SECS        processing/ 里的批全部超过这个时�
 say ""
 say "=== 安装完成 ==="
 say "处理流程见 HANDLING.md (tg_claim.sh + tg_finish.sh, 两步)"
+say ""
+say "如果用了 bin/tg_adapter.py, 这三处都要能看到 TG_HELPER 和 TG_HELPER_REAL:"
+say "  a) systemd unit (install.sh 已注入 TG_HELPER, TG_HELPER_REAL 需自行加一行 Environment=)"
+say "  b) Hatch hook 的命令行"
+say "  c) agent 调用 tg_claim/tg_finish 的环境"

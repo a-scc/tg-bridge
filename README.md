@@ -1,164 +1,55 @@
-> [中文](README.zh-CN.md) | English
+# tg-bridge: Telegram ↔ Hatch 双向桥 (纯本人链路)
 
-# Telegram bridge (inbox-first, once-delivery)
+Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥捡起来唤醒 Hatch 里的本人处理，回复再经 Telegram 发回去。Worker 只当触发器，不冒名、不占位。
 
-Pure standard-library Python. No external dependencies.
+## 一键安装
 
-What it does, in one paragraph: a Telegram bot (Bot API) polls for
-messages from one owner, writes each message to `inbox/<update_id>.json`
-(and downloads its attachment, when there is one), and a checker script
-decides when the main agent should be woken. The main agent replies
-in its own chat; replies to Telegram go through `tg_send.py`.
-Delivery is once, not leased-and-retried: the checker moves a record
-from `inbox/` to `inbox/done/` on wake, so the next poll picks the
-next record instead of being blocked by the head of the queue.
+```bash
+curl -fsSL https://raw.githubusercontent.com/a-scc/tg-bridge/main/install.sh | bash
+```
 
-## Files
+安装脚本会：克隆仓库到 `~/workspace/tg-bridge-deploy/` → 建 `inbox/`、`state/` 目录 → 提示安装 systemd 服务。
 
-- `listener.py` — polls `getUpdates`, reacts, downloads attachments,
-  writes inbox records and `state/tg_history.jsonl` (user lines only),
-  writes `state/heartbeat`.
-- `tg_send.py` — sends text / documents to Telegram, splits long text,
-  and closes an inbox item with `--done <update_id>` or
-  `--ack-only <update_id>` (close without sending). Closing clears
-  the typing work marker; the record moves to `inbox/done/closed/`
-  (its downloaded file is removed first).
-- `tg_pull.py` — pulls a file recorded as `vps_path` in an inbox
-  record, verifies size, and updates the record's `file_local`.
-  It updates only the copy that still exists (`inbox/` first, then
-  `inbox/done/`); it never recreates a missing record. SFTP runs with
-  `BatchMode=yes`: the target host key must already be in
-  `~/.ssh/known_hosts` — connect once manually (or
-  `ssh-keyscan`) before the first pull to a new host.
-- `typing_refresher.py` — separate process, NOT inside `tg_send.py`.
-  Sends `sendChatAction` typing while work is active. It is pending
-  while inbox files exist, or the work marker
-  `state/typing_active.json` exists and is not stale. The checker
-  creates the marker on wake; `tg_send.py --done` / `--ack-only`
-  clears it. Singleton via `state/typing.lock`.
-- `predownload.py` — detached, best-effort predownload.
-  Local mode (`vps_path` records): photo / document / video / voice /
-  audio / video_note / animation at or below the auto-pull threshold.
-  Cloud mode (`file_id` records): same kinds at or below the 20MB
-  Telegram hard cap, fetched via getFile + `/file/`. Failure leaves the record unchanged. It also
-  updates only the copy that still exists (`inbox/` first, then
-  `inbox/done/`).
-- `tg_bridge_check.sh` — standalone checker. It prints two lines:
-  line 1 `WAKE tg-message` / `WAKE tg-batch` / `WAKE deadletter` /
-  `WAKE unclosed-timeout` / `SILENT <reason>`, line 2 JSON payload.
-  Your poller (cron, systemd timer, or a hook system) reads those
-  lines. Poll interval is set by your poller, not by this script.
-  Even if the checker itself crashes, it still prints
-  `SILENT checker-error` + `{}` and exits 0, so a poller reading two
-  lines never reads an empty stdout (the traceback, if any, goes to
-  stderr for debugging). Non-numeric .json files in inbox/ never take
-  part in delivery: they are moved to state/failed/ once and logged
-  once to state/hook-errors.log. Rapid messages sharing a `batch_id`
-  are coalesced: the batch wakes once, when it closes (10 messages or
-  `TG_BATCH_WINDOW_SECS` + `TG_BATCH_DRAIN_SECS` after the first landed,
-  default 20s + 5s), as `WAKE tg-batch` with `batch_id`,
-  `records[]` and `inbox_files[]`; a lone message keeps the single
-  `WAKE tg-message` format (after the same wait; set both to `0` for
-  wake-on-sight, see "延迟调优" in DEPLOYMENT_KEEPALIVE.md). Records left in
-  `inbox/done/` unclosed get one `WAKE unclosed-timeout` re-wake
-  (10min after wake, typing marker gone/stale); a second timeout only
-  logs an alert.
+**安装完还需手动配置 (不在仓库里)：**
+1. **Bot Token**：走连接器配置，绝不写进文件、不进日志 (见 `HANDLING.md` 红线)
+2. **Hatch hook**：在 Hatch 里配置每 5 秒唤醒的 hook (`tg-bridge-wake`)
+3. **生产环境变量**：按需修改 `systemd/tg-bridge-poller.service` 中的 `Environment` 行
 
-## Configuration (all via environment, no values are fixed in code)
+## 处理流程 (两步)
 
-| Variable | Meaning | Default |
-|---|---|---|
-| `TG_OWNER_ID` | Numeric Telegram user id of the owner (required) | — |
-| `TG_API_BASE_URL` | Bot API base, cloud or local Bot API server | `https://api.telegram.org` |
-| `TG_API_LOCAL` | `1` = local Bot API, bypass the egress proxy | unset |
-| `TG_AUTO_PULL_MAX_MB` | Auto-pull threshold, in MB | `50` |
-| `TG_LONGPOLL_TIMEOUT` | getUpdates long-poll server wait, in seconds; HTTP client timeout is always this value + 20 | `50` |
-| `TG_BRIDGE_DIR` | Directory containing these files, for the checker | directory of the checker script |
-| `TG_BRIDGE_DRY_RUN` | `1` = checker dry run, do not move records | unset |
-| `TG_TYPING_INTERVAL_SECS` | Typing refresh interval, in seconds | `4` |
-| `TG_TYPING_MAX_MINUTES` | Typing hard cap, in minutes | `35` |
-| `TG_BATCH_WINDOW_SECS` | Batch coalescing window, in seconds; `0` = wake on sight | `20` |
-| `TG_BATCH_DRAIN_SECS` | Drain after window close, in seconds; set `0` with window | `5` |
-| `TG_SFTP_HOST`, `TG_SFTP_PORT`, `TG_SFTP_USER`, `TG_SFTP_KEY` | SFTP pull for `tg_pull.py` | unset |
+当前 `HANDLING.md` 是 2 步流程，整条链只有 2 次工具调用：
 
-Defaults above are fallbacks, not fixed caps: set the environment
-variables to change them. The auto-pull threshold in a record
-(`auto_pull_max`, written by the listener) wins over the environment
-for that record, so a record pulled later still uses the threshold
-it was recorded with. Watchdog heartbeat-stale threshold = 2x or more
-of (`TG_LONGPOLL_TIMEOUT` + 20); with the default 50s long-poll that
-is ~150s. Recalculate the threshold when you change the timeout;
-see `DEPLOYMENT_KEEPALIVE.md`.
+1. **认领**：`tg_claim.sh --uid <update_id>` (单条) 或 `tg_claim.sh` (批唤醒)
+   - 幂等检查 (`closed/`) → 原子认领到 `inbox/processing/` → 扫全量 → 附件下载 → 一次输出 JSON
+   - 状态：`claimed` / `already_processed` / `overlapped` / `nothing_to_do` / `bad_args`
 
-## Setup
+2. **回复 + 收尾**：`tg_finish.sh --chat-id <chat_id> --stdin <<'TGEOF'`
+   - 发送 (超 3900 字自动分片) → 归档到 `inbox/done/closed/` → 附件一起搬 → 删 `state/typing_active.json`
+   - 状态：`closed` / `send_failed` / `nothing_to_do` / `bad_args` / `dry_run`
 
-1. Create a bot with BotFather, get its token.
-2. Put all files in one directory, e.g. `~/tg-bridge`.
-3. Write the token to `.bot_token` in that directory, mode `600`.
-   Never commit this file, never paste the token into code, issues,
-   or chat logs. The listener warns (to stderr, and still reads
-   the file) if the token file is group/world readable; it does
-   not refuse it, so an existing deployment is not broken by
-   a loose permission.
-4. Set `TG_OWNER_ID` to your own Telegram user id. Only that user,
-   in a private chat, is accepted; anyone else is silently dropped.
-5. Run the listener, e.g. as a systemd service:
-   `ExecStart=/usr/bin/python3 /path/to/tg-bridge/listener.py`
-   with `TG_OWNER_ID`, `TG_API_BASE_URL`, and `TG_API_LOCAL`
-   in its environment.
-6. Poll `tg_bridge_check.sh` from your poller. Example: every
-   few seconds, read its two output lines; on `WAKE`, deliver the
-   payload to your main agent; on `SILENT`, do nothing.
-7. Reply from your main agent with `tg_send.py`, and close the item
-   with `--done <update_id>` (after sending) or `--ack-only
-   <update_id>` (close without sending, e.g. when you replied only
-   in your main chat).
+**保护 (已内置，不需手动做)：**
+- 幂等：以 `inbox/done/closed/<update_id>.json` 为准，重复唤醒不二次回复
+- 重叠唤醒：`processing/` 里有活文件 = 上一个 handler 还在跑，新消息并进去，本进程直接退
+- 死 handler 接管：`processing/` 滞留超 `TG_PROC_STALE_SECS` (默认 300 秒) 视为已死，接管这批
+- 发送失败不归档：消息留在 `processing/`，可重跑，不丢
+- 发送成功先落哨兵 `state/sent/<batch_key>.json` 再归档：归档失败重跑只补归档，不重复发
 
-## Large files (simplified rule)
+## 文件清单
 
-- At or below the auto-pull threshold: the file is pulled to the
-  main-agent host (via `tg_pull.py` / `predownload.py`), verified
-  by size, and then handled there.
-- Above the threshold: the file is NOT pulled through the
-  main-agent host. It stays on the Bot API host, is recorded as
-  `vps_path` + `file_size`, and is sent back to Telegram directly
-  from that host. The main-agent host only receives a short
-  notification (what it is, how large, which path on the Bot API
-  host). Predownload is background preparation, not instant
-  acceleration: a file near the threshold can take minutes over
-  a slow link, and at wake time `file_local` is often still empty;
-  in that case pull on demand with `tg_pull.py`.
+| 文件 | 说明 |
+|---|---|
+| `poller.py` | 长轮询 Telegram Bot API，写 `inbox/<update_id>.json`，启动 typing |
+| `tg_bridge_check.sh` | Checker，每 5 秒由 hook 运行，分组、投递、S1 压制、写 `wake_time` |
+| `typing_loop.py` | 每约 4 秒发 typing，根据 `inbox/`、`done/`、marker 判断 pending |
+| `tg_claim.sh` | 第 1 步：认领 (幂等 + 原子 + 扫全量 + 附件下载) |
+| `tg_finish.sh` | 第 2 步：发送 + 归档 + 删 marker |
+| `HANDLING.md` | 处理清单 (2 步流程) |
+| `systemd/tg-bridge-poller.service` | systemd 服务单元 |
+| `install.sh` | 一键安装脚本 |
 
-## What is NOT in this package
+## 红线
 
-- No credentials, no owner ids, no bot usernames, no IP addresses,
-  no private paths. Everything host-specific is an environment
-  variable (see the table above).
-- No host-specific pull / tunnel helpers. If your deployment needs
-  one, add it outside this package and point `tg_pull.py`'s SFTP
-  variables at it; do not hardcode it here.
-- No pairing / owner-onboarding flow. The owner is fixed by
-  `TG_OWNER_ID`; strangers are silently dropped, which is safer
-  than an interactive pairing step for a single-owner bridge.
-- No self-healing hook. Use your own supervisor / watchdog for
-  that; this package only checks, delivers once, and logs.
-
-## Logs and state (not for commit)
-
-- `state/tg_history.jsonl` — user message archive, rotated at
-  2000 lines to the last 1000. Only the listener writes it for now;
-  do not add a second writer without a lock.
-- `state/typing.log`, `state/predownload.log`,
-  `state/typing_spawn.log`, `state/predownload_spawn.log`,
-  `state/stale.log`, `state/hook-errors.log` — start/stop and
-  failure logs, not every ping.
-- `state/deadletter.jsonl` — records that failed handling three
-  times. The checker consumes it per line: good lines wake, bad
-  lines go to `deadletter-bad-<timestamp>.jsonl`, the original is
-  archived either way. If every line is bad, the checker is
-  `SILENT` (no wake, but the bad lines are archived).
-
-## License
-
-Use, modify, and redistribute freely. Keep the `.bot_token`
-out of every copy you share.
+- Token 经连接器代换，绝不落盘、不进日志。
+- 只处理 `claimed` 里给你的那批，不碰 `closed/`。
+- 下载只用 `tg.py download` (已由 `tg_claim.sh` 代劳)，不手拼 `/file/` URL。
+- 主聊天保持安静：只有 `send_failed`、`over_cap` 需用户知情、deadletter 时才说话。

@@ -7,8 +7,7 @@
 # Standalone: this script does NOT depend on any host hook runtime.
 # It prints two lines to stdout and exits 0, even on a checker
 # crash (then: SILENT checker-error + {}):
-#   line 1: WAKE tg-message | WAKE tg-batch | WAKE deadletter |
-#           WAKE unclosed-timeout | SILENT <reason>
+#   line 1: WAKE tg-message | WAKE deadletter | SILENT <reason>
 #   line 2: JSON payload
 # Your poller (cron, systemd timer, or a hook system) reads those
 # lines and decides what to do. Poll interval is set by your poller,
@@ -74,27 +73,16 @@ if os.path.isfile(_DL) and os.path.getsize(_DL) > 0:
 # done/closed/; records left in done/ get one unclosed-timeout re-wake.
 _DONE = os.path.join(INBOX, "done")
 
-# Batch coalescing: group inbox files by batch_id. A batch is CLOSED
-# when it holds >=10 files, or when BATCH_WINDOW (+BATCH_DRAIN) seconds
-# have passed since the batch's first file landed (mirrors the
-# listener's 20s/10 window; the drain covers landing skew so a file
-# that arrived inside the window but landed just after is not cut off).
-# A same-batch file landing after close is delivered best-effort as a
-# single. Files without batch_id (or unreadable) are singles.
-#
-# Tunable via environment (see DEPLOYMENT_KEEPALIVE.md "延迟调优"):
-# TG_BATCH_WINDOW_SECS / TG_BATCH_DRAIN_SECS. Defaults preserve the
-# original 20s/5s behavior. Set both to 0 for minimum-latency personal
-# deployments (checker wakes on sight, no batch wait).
-def _env_int(name, default):
-    try:
-        return max(0, int(os.environ.get(name, default)))
-    except (TypeError, ValueError):
-        return default
-
-
-BATCH_WINDOW = _env_int("TG_BATCH_WINDOW_SECS", 20)
-BATCH_DRAIN = _env_int("TG_BATCH_DRAIN_SECS", 5)
+# Batch coalescing: group inbox files by batch_id.
+# 2026-10-23: BATCH_WINDOW/DRAIN set to 0 for the 本人 flow. The poller
+# still tags batch_id (20s/10 window), and the checker still groups by
+# it, but there is no wait: every poll wakes immediately with whatever
+# is present. The 5s hook poll interval is the only batching now.
+# (Before: waited BATCH_WINDOW+BATCH_DRAIN for the batch to close,
+# which taxed single messages 25s. The 本人 handler deals messages
+# as they arrive, so the wait is pure latency.)
+BATCH_WINDOW = 0
+BATCH_DRAIN = 0
 BATCH_MAX = 10
 
 def _move_to_done(fname):
@@ -112,6 +100,10 @@ def _move_to_done(fname):
             _rec["update_id"] = int(fname.split(".")[0])
         except ValueError:
             pass
+    try:                                  # [测量用] 落盘时刻, 与 wake_time 同钟
+        _rec["inbox_mtime"] = os.path.getmtime(_sp)
+    except OSError:
+        pass
     _rec["wake_time"] = time.time()
     _tp = _dp + ".tmp"
     with open(_tp, "w", encoding="utf-8") as _df:
@@ -176,6 +168,10 @@ if _bad and not DRY:
 
 # Group by batch_id.
 _batches = {}
+# _singles: records with no/invalid batch_id (e.g. corrupted JSON that failed
+# to parse). They go through _move_to_done's {"kind": "unreadable"} fallback
+# so a broken file still surfaces as "something is broken" instead of
+# getting stuck in inbox forever. Do NOT delete this branch.
 _singles = []
 for _f in files:
     _p = os.path.join(INBOX, _f)
@@ -263,6 +259,42 @@ if not _cands:
 
 _cands.sort(key=lambda _c: _c[0])
 _, _bid, _fs = _cands[0]
+
+# --- 忙碌期压制: 上一个 handoff 还在处理时, 不为这批再起一个 worker ---
+# 目的: 连发 k 条从 k*C 压成 1*C (C 是 Hatch 派发的固定成本)。
+# 兜底: 记录等待超过 TG_DEFER_WHILE_BUSY_SECS 就照常投递, 处理者卡死不会饿死消息。
+# 注意: TG_DEFER_WHILE_BUSY_SECS=0 表示关闭压制 (默认)。部署时在 Environment= 里设 120。
+try:
+    _SUPPRESS_MAX = int(os.environ.get("TG_DEFER_WHILE_BUSY_SECS", "0"))
+except ValueError:
+    _SUPPRESS_MAX = 0
+if not DRY and _SUPPRESS_MAX > 0:
+    _busy, _mage = False, None
+    try:
+        _m = json.load(open(os.path.join(STATE, "typing_active.json"), encoding="utf-8"))
+        _mt = _m.get("time")
+        if isinstance(_mt, (int, float)):
+            _mage = _now - _mt
+            _busy = _mage <= _SUPPRESS_MAX      # 只相信 SUPPRESS_MAX 以内的 marker
+    except Exception:
+        _busy = False
+    if _busy:
+        # 显式取 _fs, 不依赖前面是否已 unpack (推上游时位置可能不同)
+        _fs = _cands[0][2]
+        try:
+            _wait = _now - min(os.path.getmtime(os.path.join(INBOX, _f)) for _f in _fs)
+        except OSError:
+            _wait = 0.0                         # 拿不到 mtime 就别压制, 宁可多醒一次
+        if _wait < _SUPPRESS_MAX:
+            _log_hook(f"handler-busy suppressed batch={_bid} wait={_wait:.1f}s "
+                      f"marker_age={_mage:.1f}s")   # 便于事后确认真的压住了
+            print("SILENT handler-busy")
+            print(json.dumps({"batch_id": _bid,
+                              "waiting_secs": round(_wait, 1),
+                              "marker_age_secs": round(_mage, 1),
+                              "suppress_max": _SUPPRESS_MAX}, ensure_ascii=False))
+            raise SystemExit
+
 if not DRY:
     os.makedirs(_DONE, exist_ok=True)
 

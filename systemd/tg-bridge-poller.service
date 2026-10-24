@@ -1,0 +1,23 @@
+[Unit]
+Description=TG bridge connector poller (Phase 1, cloud mode)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/hatch/workspace/tg-bridge-deploy/poller.py
+WorkingDirectory=/home/hatch/workspace/tg-bridge-deploy
+Environment=HOME=/home/hatch
+EnvironmentFile=/home/hatch/workspace/tg-bridge-deploy/systemd/proxy.env
+Environment=TG_OWNER_ID=8439335803
+# Sandbox egress proxy cuts TLS connections held longer than ~20-30s;
+# keep the long-poll below that (repo default is 50).
+Environment=TG_LONGPOLL_TIMEOUT=20
+Environment=TG_BATCH_GROUP_SECS=150
+Environment=TG_BATCH_GROUP_MAX=10
+Environment=TG_DEFER_WHILE_BUSY_SECS=120
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=multi-user.target

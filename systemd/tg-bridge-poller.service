@@ -19,7 +19,7 @@ User=__RUN_USER__
 WorkingDirectory=__INSTALL_DIR__
 ExecStart=__PYTHON__ __INSTALL_DIR__/poller.py
 Environment=HOME=__RUN_HOME__
-# 出口代理会切断超过 ~20-30s 的 TLS 连接, 所以长轮询压到 20 (仓库默认 50)
+# 出口代理会切断超过 ~20-30s 的 TLS 连接, 所以长轮询定在 20 (代码默认也是 20)
 Environment=TG_LONGPOLL_TIMEOUT=20
 # 只影响 batch_id 命名; checker 已 hardcode BATCH_WINDOW=0、无等待, 立即投递
 Environment=TG_BATCH_GROUP_SECS=150

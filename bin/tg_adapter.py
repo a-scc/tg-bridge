@@ -36,9 +36,10 @@ import subprocess
 import sys
 import tempfile
 
-REAL = os.path.expanduser(os.environ.get(
-    "TG_HELPER_REAL",
-    "~/workspace/custom-connectors/custom.telegram/bin/tg.py"))
+# 用 or 而不是 get 的默认值: unit 里若写成 Environment=TG_HELPER_REAL=
+# (变量没配时常见), get 会返回空串把默认值顶掉, 这里兜住。
+REAL = os.path.expanduser(os.environ.get("TG_HELPER_REAL")
+                          or "~/workspace/custom-connectors/custom.telegram/bin/tg.py")
 
 
 def _die(msg, extra=None):

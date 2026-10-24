@@ -60,7 +60,7 @@ _BATCH = {"id": None, "start": 0, "count": 0, "seq": 0}
 try:
     GROUP_WINDOW = max(0, int(os.environ.get("TG_BATCH_GROUP_SECS", "150")))
 except ValueError:
-    GROUP_WINDOW = 20
+    GROUP_WINDOW = 150
 try:
     GROUP_MAX = max(1, int(os.environ.get("TG_BATCH_GROUP_MAX", "10")))
 except ValueError:

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""TG bridge connector poller (Phase 1, cloud mode).
+"""TG bridge connector poller.
 
-Replaces listener.py's network layer: instead of holding a bot token,
+Replaces the old version's network layer: instead of holding a bot token,
 it shells out to the custom.telegram connector helper (tg.py), whose
 credential lives in the Secure Vault and never touches disk.
 
 Record format in inbox/<update_id>.json is byte-compatible with the
-open-source tg-bridge listener.py, so tg_bridge_check.sh works unchanged.
+open-source tg-bridge old version, so tg_bridge_check.sh works unchanged.
 
 Owner: TG_OWNER_ID env (required, no default — 未配置直接退出).
 Bridge dir: this file's directory (inbox/, state/ underneath).
@@ -39,27 +39,26 @@ except ValueError:
     OWNER_ID = 0          # main() 会据此退出并给出提示
 
 # Long-poll tuning: TG_LONGPOLL_TIMEOUT sets the getUpdates server-side
-# wait (default 50, the repo profile's recommended default). The helper
+# wait (default 20; upstream used 50, but egress proxy cuts connections
+# held longer than ~20-30s, so 20 is the safe default). The helper
 # subprocess timeout is always server timeout + 20s. Override the env var
-# in the systemd unit when the network kills long-lived TLS connections
-# (this sandbox's egress proxy cuts connections held longer than ~20-30s,
-# so the unit sets TG_LONGPOLL_TIMEOUT=20); then recalculate the watchdog
+# in the systemd unit if needed; then recalculate the watchdog
 # heartbeat-stale threshold as 2x (server timeout + 20).
 try:
-    LONGPOLL_TIMEOUT = int(os.environ.get("TG_LONGPOLL_TIMEOUT", "50") or 50)
+    LONGPOLL_TIMEOUT = int(os.environ.get("TG_LONGPOLL_TIMEOUT", "20") or 20)
     if LONGPOLL_TIMEOUT <= 0:
         raise ValueError("non-positive long-poll timeout")
 except ValueError:
-    LONGPOLL_TIMEOUT = 50
+    LONGPOLL_TIMEOUT = 20
 
 _BATCH = {"id": None, "start": 0, "count": 0, "seq": 0}
 # Batch grouping window: messages within this window share a batch_id,
-# letting the checker deliver them in one WAKE. Under S1 suppression
+# letting the checker deliver them in one WAKE. Under busy suppression
 # (busy-period), a larger window (120-180s) merges bursts for free —
 # grouping window only affects batch_id assignment, not delivery timing.
 # NOTE: GROUP_WINDOW=0 disables merging (each msg new id = each WAKE).
 try:
-    GROUP_WINDOW = max(0, int(os.environ.get("TG_BATCH_GROUP_SECS", "20")))
+    GROUP_WINDOW = max(0, int(os.environ.get("TG_BATCH_GROUP_SECS", "150")))
 except ValueError:
     GROUP_WINDOW = 20
 try:
@@ -112,7 +111,7 @@ def tg(*args, timeout=70):
 
 
 def _spawn_react(chat_id, message_id):
-    # S2: the old react() ran inline here and blocked the poll loop for a
+    # 旧版 react() ran inline here and blocked the poll loop for a
     # full helper-subprocess + HTTPS round trip, delaying the next getUpdates
     # (i.e. inflating A for a message arriving right behind). Now detached,
     # mirroring _spawn_typing_loop: fire-and-forget, best-effort, never

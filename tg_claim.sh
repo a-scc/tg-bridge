@@ -134,7 +134,7 @@ for d in (PROC, CLOSED, FILES, STATE, CLAIMD):
         pass
 
 # ---------- 步骤 0: 幂等检查 ----------
-# 被 S1 压掉后迟到的唤醒、重叠唤醒都会走到这里: closed/ 里有 = 已回过, 不许再回。
+# 被忙时压制后迟到的唤醒、重叠唤醒都会走到这里: closed/ 里有 = 已回过, 不许再回。
 if TRIGGER:
     if not TRIGGER.isdigit():
         out("bad_args", error=f"--uid 必须是数字, 收到 {TRIGGER!r}")

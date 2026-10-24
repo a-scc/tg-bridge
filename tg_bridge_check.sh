@@ -75,7 +75,7 @@ _DONE = os.path.join(INBOX, "done")
 
 # Batch coalescing: group inbox files by batch_id.
 # 2026-10-23: BATCH_WINDOW/DRAIN set to 0 for the 本人 flow. The poller
-# still tags batch_id (20s/10 window), and the checker still groups by
+# still tags batch_id (150s/10 window, 以 unit 为准), and the checker still groups by
 # it, but there is no wait: every poll wakes immediately with whatever
 # is present. The 5s hook poll interval is the only batching now.
 # (Before: waited BATCH_WINDOW+BATCH_DRAIN for the batch to close,
@@ -263,7 +263,7 @@ _, _bid, _fs = _cands[0]
 # --- 忙碌期压制: 上一个 handoff 还在处理时, 不为这批再起一个 worker ---
 # 目的: 连发 k 条从 k*C 压成 1*C (C 是 Hatch 派发的固定成本)。
 # 兜底: 记录等待超过 TG_DEFER_WHILE_BUSY_SECS 就照常投递, 处理者卡死不会饿死消息。
-# 注意: TG_DEFER_WHILE_BUSY_SECS=0 表示关闭压制 (默认)。部署时在 Environment= 里设 120。
+# 注意: TG_DEFER_WHILE_BUSY_SECS=0 表示关闭压制 (默认)。要设就写在 hook 命令行上: TG_DEFER_WHILE_BUSY_SECS=120 bash tg_bridge_check.sh。
 try:
     _SUPPRESS_MAX = int(os.environ.get("TG_DEFER_WHILE_BUSY_SECS", "0"))
 except ValueError:

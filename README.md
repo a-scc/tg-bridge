@@ -68,6 +68,9 @@ systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡�
 | `TG_HELPER` | 见前置依赖 | poller / typing_loop / claim / finish | unit + hook + agent 环境（三处，或不设用默认）|
 | `TG_DEFER_WHILE_BUSY_SECS` | 0 | checker | **hook 的命令行**，例：`TG_DEFER_WHILE_BUSY_SECS=120 bash <dir>/tg_bridge_check.sh` |
 | `TG_PROC_STALE_SECS` | 1800 | claim | 一般不用改；要改就在调用 claim 的环境里 export |
+| `TG_BATCH_GROUP_MAX` | 10 | poller | unit（单批最多消息数，超了立即闭合投递）|
+| `TG_TYPING_INTERVAL_SECS` | 4 | typing_loop | typing_loop 环境（每几秒发一次 typing）|
+| `TG_TYPING_MAX_MINUTES` | 35 | typing_loop | typing_loop 环境（typing 最长持续分钟数，超时自动停）|
 
    ⚠️ 注意 `TG_DEFER_WHILE_BUSY_SECS` 的默认是 **0（关闭）**。unit 里以前那行 `=120` 从来没生效过
    （checker 读不到），已删除；想开启必须写在 hook 命令上。
@@ -105,7 +108,7 @@ systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡�
 | 文件 | 说明 |
 |---|---|
 | `poller.py` | 长轮询 Telegram Bot API，写 `inbox/<update_id>.json`，启动 typing |
-| `tg_bridge_check.sh` | Checker，每 5 秒由 hook 以 `bash` 运行，分组、投递、S1 压制、写 `wake_time` |
+| `tg_bridge_check.sh` | Checker，每 5 秒由 hook 以 `bash` 运行，分组、投递、忙时压制、写 `wake_time` |
 | `typing_loop.py` | 每约 4 秒发 typing，根据 `inbox/`、`done/`、marker 判断 pending |
 | `tg_claim.sh` | 第 1 步：认领 (幂等 + 原子 + 扫全量 + 附件下载) |
 | `tg_finish.sh` | 第 2 步：发送 + 归档 + 删 marker |
@@ -120,8 +123,9 @@ systemd 照样显示 active、日志里刷 `poll error`，但一条消息都捡�
 - **桥内固定开销 0–5 秒**，主要来自 5 秒的 hook 轮询相位（均值 2.5s）。poller 侧检测 ≈0.3–0.5s，checker 自身 ≈0.05s。整体地板约 0.4s，需要改成事件驱动才拿得到，收益上限 2.5s。
 - **更大的耗时在 Hatch 侧**（worker 派发 + handoff + 模型生成），不在本仓库里。
 - **心跳 stale 阈值**：按 `2 × (TG_LONGPOLL_TIMEOUT + 20)` 算，`TG_LONGPOLL_TIMEOUT=20` → **80 秒**。
-  Hatch 侧 keepalive 若还写着 150 秒（那是上游默认 50 秒长轮询的旧值），只是漏检更久、不会误杀；
+  Hatch 侧 keepalive 若还写着 150 秒（那是按上游默认 50 秒长轮询算的旧值；本仓库代码默认值已改成 20 秒），只是漏检更久、不会误杀；
   建议改成 80–90 秒。`state/heartbeat` 由 `poller.py` 写，读它的在 Hatch 侧。
+- **checker 计时常量**：typing-stale 120 秒（marker 超 120 秒没更新视为已消失）；unclosed 重唤 10 分钟（`done/` 里滞留超 600 秒且 typing 已消失时再唤醒一次，防丢消息）。这两个只在 `tg_bridge_check.sh` 代码里，改不了配置。
 - **单 owner**：只接受 `TG_OWNER_ID` 一个人的私聊消息，其他发件人和群聊静默丢弃。
 - 附件上限 20MB（`tg_claim.sh` 的 `MAX_BYTES`），超限只报尺寸不下载。
 

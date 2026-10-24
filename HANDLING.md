@@ -52,7 +52,7 @@ bash ~/workspace/tg-bridge-deploy/tg_finish.sh \
 TGEOF
 ```
 
-它一次完成：发送（>4096 字自动分片）→ 归档到 `inbox/done/closed/` → 附件一起搬 →
+它一次完成：发送（>3900 字自动分片）→ 归档到 `inbox/done/closed/` → 附件一起搬 →
 删 `state/typing_active.json`。所以**整条链只有 2 次工具调用**：claim + finish。
 
 （heredoc 用带引号的 `'TGEOF'`，正文里的引号、反引号、`$`、反斜杠都会原样送出——已实测。
@@ -68,7 +68,7 @@ TGEOF
 
 - **幂等**：以 `inbox/done/closed/<update_id>.json` 为准。重复唤醒不会二次回复。
 - **归属隔离**：`claim` 把本批 uid 写进 `state/claim/<claim_id>.json`，`finish` 只归档这批。
-  别人的批（包括同时跑着的另一个 handler）**完全不碰**。新消息不会被塞进别人的批里当赡养费。
+  别人的批（包括同时跑着的另一个 handler）**完全不碰**。新消息不会被塞进别人的批里一起归档掉。
 - **死 handler 接管**：`processing/` 里的批**全部**超过 `TG_PROC_STALE_SECS`（默认 1800 秒）
   视为 handler 已死，下一次 claim 接管。`processing/` 不在 poller / checker / typing_loop 任何
   扫描路径里，没有这条兜底，handler 一崩消息就永久失踪。

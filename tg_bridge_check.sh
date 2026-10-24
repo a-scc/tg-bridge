@@ -14,7 +14,7 @@
 # not by this script.
 #
 # Bridge directory: set TG_BRIDGE_DIR to the directory that contains
-# listener.py, tg_send.py, and the inbox/ and state/ directories.
+# poller.py, tg_claim.sh, tg_finish.sh, and the inbox/ and state/ dirs.
 # If TG_BRIDGE_DIR is not set, it defaults to the directory that
 # contains this script (i.e. put all files in one directory).
 set -euo pipefail

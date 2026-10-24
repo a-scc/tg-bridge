@@ -130,7 +130,7 @@ def _spawn_react(chat_id, message_id):
 
 
 def _spawn_typing_loop(chat_id):
-    # Typing loop, separate process (mirrors the repo's typing_refresher).
+    # Typing loop, separate process.
     # Best-effort, never blocks the poll loop. Singleton via flock; stops
     # when work is cleared (see typing_loop.py).
     try:
@@ -295,8 +295,8 @@ def handle_update(upd):
         rec["file_id"] = file_id
         if file_size is not None:
             rec["file_size"] = file_size
-        # Cloud mode: never download synchronously here; a detached
-        # predownload (connector-based) fetches via getFile instead.
+        # Cloud mode: never download synchronously here; tg_claim.sh fetches
+        # it via the connector's getFile when the agent claims the batch.
         rec["text"] = (rec["text"]
                        + "\n[attachment pending cloud download]").strip()
     if edited:

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Connector-based typing refresher for the TG bridge (separate process).
 
-Mirrors the repo's typing_refresher.py, but sends typing via the
-custom.telegram connector helper (tg.py) so the bot token never
-touches disk.
+Sends typing via the custom.telegram connector helper (tg.py) so the
+bot token never touches disk.
 
 Sends sendChatAction typing every INTERVAL seconds while work is
 active, stops on its own when work is cleared, hard cap MAX_RUNTIME.

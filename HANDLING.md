@@ -15,13 +15,13 @@
 单条唤醒（payload 里有 `update_id`）：
 
 ```bash
-~/workspace/tg-bridge-deploy/tg_claim.sh --uid <update_id>
+bash ~/workspace/tg-bridge-deploy/tg_claim.sh --uid <update_id>
 ```
 
 批唤醒（`WAKE tg-batch`，payload 里是 `batch_id` + `records`）：不带 `--uid`。
 
 ```bash
-~/workspace/tg-bridge-deploy/tg_claim.sh
+bash ~/workspace/tg-bridge-deploy/tg_claim.sh
 ```
 
 读它输出的那一行 JSON，按 `status` 分支：
@@ -43,7 +43,7 @@
 正文用 heredoc 直给，**不要**再经过 shell 参数传文本（避免转义事故）：
 
 ```bash
-~/workspace/tg-bridge-deploy/tg_finish.sh --chat-id <chat_id> --stdin <<'TGEOF'
+bash ~/workspace/tg-bridge-deploy/tg_finish.sh --chat-id <chat_id> --stdin <<'TGEOF'
 （这里是回复正文，简体中文、亲昵自然、简短，一批只回一条）
 TGEOF
 ```

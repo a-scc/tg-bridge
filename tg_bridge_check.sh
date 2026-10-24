@@ -136,7 +136,7 @@ def _typing_gone_or_stale(now):
     try:
         _m = json.load(open(_mp, encoding="utf-8"))
         _mt = _m.get("time")
-        if isinstance(_mt, (int, float)) and now - _mt <= 35 * 60:
+        if isinstance(_mt, (int, float)) and now - _mt <= 120:
             return False
     except Exception:
         pass

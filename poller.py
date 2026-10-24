@@ -8,7 +8,7 @@ credential lives in the Secure Vault and never touches disk.
 Record format in inbox/<update_id>.json is byte-compatible with the
 open-source tg-bridge listener.py, so tg_bridge_check.sh works unchanged.
 
-Owner: TG_OWNER_ID env (default 8439335803).
+Owner: TG_OWNER_ID env (required, no default — 未配置直接退出).
 Bridge dir: this file's directory (inbox/, state/ underneath).
 """
 import fcntl
@@ -29,10 +29,12 @@ HISTORY_FILE = os.path.join(STATE_DIR, "tg_history.jsonl")
 TG_HELPER = os.path.expanduser(
     "~/workspace/custom-connectors/custom.telegram/bin/tg.py")
 
+# 不内置默认 id: 配错/未配时必须响亮地失败, 而不是静默只认某一个人的消息。
+_RAW_OWNER = (os.environ.get("TG_OWNER_ID") or "").strip()
 try:
-    OWNER_ID = int(os.environ.get("TG_OWNER_ID", "8439335803") or 0)
+    OWNER_ID = int(_RAW_OWNER)
 except ValueError:
-    OWNER_ID = 8439335803
+    OWNER_ID = 0          # main() 会据此退出并给出提示
 
 # Long-poll tuning: TG_LONGPOLL_TIMEOUT sets the getUpdates server-side
 # wait (default 50, the repo profile's recommended default). The helper
@@ -330,7 +332,8 @@ def acquire_singleton():
 
 def main():
     if not OWNER_ID:
-        raise SystemExit("TG_OWNER_ID env var is required (numeric Telegram user id)")
+        raise SystemExit("TG_OWNER_ID env var is required and must be numeric "
+                         "(your own Telegram user id; get it from @userinfobot)")
     print("tg-bridge connector poller starting", flush=True)
     _lock = acquire_singleton()
     for d in (INBOX_DIR, FILES_DIR):

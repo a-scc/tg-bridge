@@ -11,12 +11,12 @@
 #   * 任何情况都 exit 0, 第一行是 JSON
 #
 # 用法:
-#   ./tg_finish.sh --chat-id 8439335803 --text-file /tmp/reply.txt
-#   ./tg_finish.sh --chat-id 8439335803 --stdin <<'EOF'     # 推荐: 正文直给, 一次调用搞定
+#   ./tg_finish.sh --chat-id <chat_id> --text-file /tmp/reply.txt
+#   ./tg_finish.sh --chat-id <chat_id> --stdin <<'EOF'     # 推荐: 正文直给, 一次调用搞定
 #   回复正文
 #   EOF
-#   ./tg_finish.sh --chat-id 8439335803 --text-file /tmp/reply.txt --dry-run
-#   ./tg_finish.sh --chat-id 8439335803 --text-file /tmp/reply.txt --batch-key 12345
+#   ./tg_finish.sh --chat-id <chat_id> --text-file /tmp/reply.txt --dry-run
+#   ./tg_finish.sh --chat-id <chat_id> --text-file /tmp/reply.txt --batch-key 12345
 #
 # 输出 status:
 #   closed          已发送并归档(正常收尾)

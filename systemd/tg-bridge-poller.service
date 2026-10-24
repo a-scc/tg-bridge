@@ -1,20 +1,33 @@
+# tg-bridge poller (systemd unit 模板)
+#
+# 本文件是**模板**: __RUN_USER__ / __RUN_HOME__ / __INSTALL_DIR__ / __PYTHON__ /
+# __TG_OWNER_ID__ 由 install.sh 注入。手工安装请先把这 5 个占位符换成实际值,
+# 否则服务起不来(install.sh 会拒绝安装带占位符的 unit)。
+#
+# 要点:
+#   - EnvironmentFile 前缀 '-' 表示文件缺省也不报错(proxy.env 是沙箱出口代理配置, 没有就留空)
+#   - TG_OWNER_ID 必填。poller.py 不再内置默认值: 缺失或非数字会直接退出, 不会退回到任何人的 id
+#   - RestartPreventExitStatus=2: 单例冲突/401/409 时不重启(重启也是白抢同一个 offset)
+
 [Unit]
-Description=TG bridge connector poller (Phase 1, cloud mode)
+Description=tg-bridge connector poller (Phase 1, cloud mode)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/hatch/workspace/tg-bridge-deploy/poller.py
-WorkingDirectory=/home/hatch/workspace/tg-bridge-deploy
-Environment=HOME=/home/hatch
-EnvironmentFile=/home/hatch/workspace/tg-bridge-deploy/systemd/proxy.env
-Environment=TG_OWNER_ID=8439335803
-# Sandbox egress proxy cuts TLS connections held longer than ~20-30s;
-# keep the long-poll below that (repo default is 50).
+User=__RUN_USER__
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__PYTHON__ __INSTALL_DIR__/poller.py
+Environment=HOME=__RUN_HOME__
+# 出口代理会切断超过 ~20-30s 的 TLS 连接, 所以长轮询压到 20 (仓库默认 50)
 Environment=TG_LONGPOLL_TIMEOUT=20
+# 只影响 batch_id 命名; checker 的 BATCH_WINDOW=0 才是"立即投递"的开关
 Environment=TG_BATCH_GROUP_SECS=150
 Environment=TG_BATCH_GROUP_MAX=10
+# S1 忙时压制: 上一批还在处理时不为新消息再起 worker。0=关闭; 追求最低延迟可设 30
 Environment=TG_DEFER_WHILE_BUSY_SECS=120
+Environment=TG_OWNER_ID=__TG_OWNER_ID__
+EnvironmentFile=-__INSTALL_DIR__/systemd/proxy.env
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2

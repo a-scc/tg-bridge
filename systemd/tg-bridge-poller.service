@@ -24,8 +24,9 @@ Environment=TG_LONGPOLL_TIMEOUT=20
 # 只影响 batch_id 命名; checker 的 BATCH_WINDOW=0 才是"立即投递"的开关
 Environment=TG_BATCH_GROUP_SECS=150
 Environment=TG_BATCH_GROUP_MAX=10
-# S1 忙时压制: 上一批还在处理时不为新消息再起 worker。0=关闭; 追求最低延迟可设 30
-Environment=TG_DEFER_WHILE_BUSY_SECS=120
+# 注意: TG_DEFER_WHILE_BUSY_SECS 由 tg_bridge_check.sh 读取, 而 checker 是 Hatch hook
+# 拉起的进程, 不是本服务的子进程 —— 写在这里读不到。要设就写在 hook 的命令行上:
+#   TG_DEFER_WHILE_BUSY_SECS=120 bash <install_dir>/tg_bridge_check.sh
 Environment=TG_OWNER_ID=__TG_OWNER_ID__
 EnvironmentFile=-__INSTALL_DIR__/systemd/proxy.env
 Restart=on-failure

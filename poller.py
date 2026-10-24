@@ -26,8 +26,10 @@ STATE_DIR = os.path.join(BASE_DIR, "state")
 OFFSET_FILE = os.path.join(STATE_DIR, "offset.txt")
 HEARTBEAT_FILE = os.path.join(STATE_DIR, "heartbeat")
 HISTORY_FILE = os.path.join(STATE_DIR, "tg_history.jsonl")
-TG_HELPER = os.path.expanduser(
-    "~/workspace/custom-connectors/custom.telegram/bin/tg.py")
+# 必须可覆盖: 不同机器上 helper 可能不在同一个连接器目录下。
+# 默认值指向本机实际在用的那个 (2026-10 起 <home>/workspace/custom-connectors/custom.telegram/bin/tg.py)。
+TG_HELPER = os.path.expanduser(os.environ.get(
+    "TG_HELPER", "~/workspace/custom-connectors/custom.telegram/bin/tg.py"))
 
 # 不内置默认 id: 配错/未配时必须响亮地失败, 而不是静默只认某一个人的消息。
 _RAW_OWNER = (os.environ.get("TG_OWNER_ID") or "").strip()

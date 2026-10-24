@@ -33,8 +33,10 @@ DONE_DIR = os.path.join(INBOX_DIR, "done")
 STATE_DIR = os.path.join(BASE_DIR, "state")
 MARKER_FILE = os.path.join(STATE_DIR, "typing_active.json")
 LOG_FILE = os.path.join(STATE_DIR, "typing.log")
-TG_HELPER = os.path.expanduser(
-    "~/workspace/custom-connectors/custom.telegram/bin/tg.py")
+# 必须可覆盖: 不同机器上 helper 可能不在同一个连接器目录下。
+# 默认值指向本机实际在用的那个 (2026-10 起 <home>/workspace/custom-connectors/custom.telegram/bin/tg.py)。
+TG_HELPER = os.path.expanduser(os.environ.get(
+    "TG_HELPER", "~/workspace/custom-connectors/custom.telegram/bin/tg.py"))
 
 try:
     INTERVAL = int(os.environ.get("TG_TYPING_INTERVAL_SECS", "4"))

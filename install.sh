@@ -30,6 +30,15 @@ UNIT_DST="/etc/systemd/system/$UNIT_NAME"
 die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
 
+FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force)    FORCE=1; shift ;;
+    -h|--help)  sed -n '2,20p' "$0"; exit 0 ;;
+    *)          die "未知参数: $1 (可用: --force)" ;;
+  esac
+done
+
 say "=== tg-bridge 安装 ==="
 say "  安装目录: $INSTALL_DIR"
 say "  运行用户: $RUN_USER (home=$RUN_HOME)"
@@ -46,6 +55,20 @@ PYTHON="$(command -v python3)"
 [ -f "$TG_HELPER" ] || die "找不到连接器: $TG_HELPER
   本仓库不含 tg.py (Bot Token 不落盘, 由 Secure Vault 提供)。
   请先配好 custom.telegram 连接器, 或用 TG_HELPER=/path/to/tg.py 指定。"
+# 自检 helper 认不认我们依赖的子命令。不认的话后果是分层的:
+#   poller 起不来(exit 2) / finish 永远 send_failed / claim 附件全失败 / typing 静默失效。
+# 只告警不中止 —— 也可能只是个换了措辞的适配器。
+_missing=""
+_help="$(python3 "$TG_HELPER" --help 2>&1 || true)"
+for _v in getupdates react typing download send; do
+  printf '%s' "$_help" | grep -q "$_v" || _missing="$_missing $_v"
+done
+if [ -n "$_missing" ]; then
+  say "⚠️  helper 的 --help 里没看到:$_missing"
+  say "    先用最要紧的那条验一下:  python3 $TG_HELPER getupdates --timeout 1 --offset 0"
+  say "    返回 {\"ok\": true} 就没事(可能只是 --help 措辞不同);"
+  say "    返回 invalid choice 才是真的指错了文件 → 改 TG_HELPER 重跑。"
+fi
 say "[1/5] 依赖检查通过"
 
 # --- 2/5 代码 -------------------------------------------------------------
@@ -124,6 +147,25 @@ if [ "$install_service" = 1 ]; then
   fi
   $SUDO install -m 0644 "$_unit" "$UNIT_DST"
   rm -f "$_unit"
+  # 同一个 bot 两个长轮询 → 409 → 新 poller exit 2(且 RestartPreventExitStatus=2 不再重启)
+  if $SUDO systemctl is-active --quiet "$UNIT_NAME"; then
+    say "      检测到 $UNIT_NAME 已在运行 → 先停再起(避免同一 bot 双轮询 409)"
+    $SUDO systemctl stop "$UNIT_NAME" || true
+  fi
+  _legacy=""
+  command -v pgrep >/dev/null 2>&1 && _legacy="$(pgrep -f 'listener\.py' 2>/dev/null | tr '\n' ' ' || true)"
+  # 只认第一列的单元名: 描述列里出现 "tg-bridge" 不算
+  _other="$($SUDO systemctl list-units --type=service --all --no-legend 2>/dev/null \
+            | awk '{print $1}' | grep -E '^tg-bridge[^ ]*\.service$' \
+            | grep -v "^${UNIT_NAME}$" | tr '\n' ' ' || true)"
+  if [ -n "$_legacy$_other" ] && [ "$FORCE" != "1" ]; then
+    say ""
+    [ -n "$_legacy" ] && say "  ⚠️  检测到旧 listener 进程: $_legacy"
+    [ -n "$_other" ]  && say "  ⚠️  检测到其他 tg-bridge* 单元: $_other"
+    die "旧桥还在跑。同一个 bot 双轮询会 409, 且新 poller 会 exit 2 停住。
+  先停旧桥: systemctl stop <旧单元>  /  kill <旧 PID>
+  确认已停、仍要继续: bash install.sh --force"
+  fi
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now "$UNIT_NAME"
   say "[4/5] 服务已安装并启动: $UNIT_DST"

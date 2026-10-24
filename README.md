@@ -7,10 +7,10 @@ Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥捡起来�
 | 依赖 | 说明 |
 |---|---|
 | `python3` + `git` | 安装脚本会检查 |
-| **`tg.py` 连接器** | **不在本仓库**。路径默认 `~/workspace/custom-connectors/custom.telegram/bin/tg.py`，可用 `TG_HELPER=` 覆盖 |
+| **`tg.py` 连接器** | **不在本仓库**。实际路径 `~/workspace/custom-connectors/custom.telegram/bin/tg.py`，可用 `TG_HELPER=` 覆盖。⚠️ 这个文件虽然住在 `custom.telegram`（看着像旧注册目录），但**它是在用的那个，别删目录**；删了桥立刻起不来 |
 | Bot Token | 由 `tg.py` 所在的连接器（Secure Vault）持有，**不落盘、不进日志、不进本仓库** |
 | systemd | 跑 poller；装服务时才需要 |
-| Hatch hook | 每 5 秒调用 `bash tg_bridge_check.sh`，在 Hatch 侧配置 |
+| Hatch hook | 每 5 秒调用一次，命令里带上 checker 侧要用的环境变量（见"安装后必须配置"第 4 条）|
 
 `poller.py`、`typing_loop.py`、`tg_claim.sh`、`tg_finish.sh` 四个文件全部通过 `tg.py` 收发。**没有连接器，装完是跑不起来的**，所以 `install.sh` 会先检查它，缺了直接退出。
 
@@ -39,16 +39,29 @@ bash install.sh
 1. **`TG_OWNER_ID`**：你自己的 Telegram 数字 id（给 `@userinfobot` 发条消息即可）。
    **这是单 owner 设计**：不匹配的消息会被静默丢弃。`poller.py` 没有内置默认值，未配置会直接退出。
 2. **Bot Token**：由连接器提供，见上方前置依赖。
-3. **Hatch hook**：每 5 秒调用一次 `bash ~/workspace/tg-bridge-deploy/tg_bridge_check.sh`。
-   **必须用 `bash` 调用**（它本身不常驻，每次由 hook 起一个新进程）。
-4. **可选环境变量**（改 unit 后 `systemctl daemon-reload && systemctl restart tg-bridge-poller`）：
+3. **Hatch hook**：每 5 秒调用一次。checker 的环境变量**只能写在这里**（它不是 systemd 子进程）：
 
-| 变量 | 默认 | 作用 |
-|---|---|---|
-| `TG_DEFER_WHILE_BUSY_SECS` | 120 | S1 忙时压制：上一批还在处理时不为新消息再起 worker，最坏可让一条消息多等 120s。`0` = 关闭 |
-| `TG_BATCH_GROUP_SECS` | 150 | 批量分组窗口。**只影响 `batch_id` 命名，不影响投递时刻**（checker 的 `BATCH_WINDOW=0` 才是立即投递的开关） |
-| `TG_LONGPOLL_TIMEOUT` | 20 | 长轮询秒数。出口代理会掐 20–30s 的连接，所以别按上游默认的 50 |
-| `TG_PROC_STALE_SECS` | 1800 | `processing/` 里的批全部超过这个时长才视为 handler 已死并接管（宁可晚救，不抢在跑的批）|
+   ```bash
+   TG_DEFER_WHILE_BUSY_SECS=120 bash ~/workspace/tg-bridge-deploy/tg_bridge_check.sh
+   ```
+   **必须用 `bash` 调用**（它本身不常驻，每次由 hook 起一个新进程）。
+4. **环境变量：先分清是谁在读**，放错层等于没配。
+
+   - `poller.py` 是 systemd 服务 → 写在 unit 的 `Environment=` 里**有效**。
+   - `tg_bridge_check.sh` 由 Hatch hook 拉起、`tg_claim.sh` / `tg_finish.sh` 由 agent shell 拉起，
+     **都不是 systemd 的子进程** → 写进 unit 读不到，必须写在**调用方**的环境里。
+
+| 变量 | 默认 | 读它的 | 该写在哪 |
+|---|---|---|---|
+| `TG_OWNER_ID` | 必填 | poller | unit |
+| `TG_LONGPOLL_TIMEOUT` | 20 | poller | unit |
+| `TG_BATCH_GROUP_SECS` | 150 | poller | unit（只影响 `batch_id` 命名，不影响投递时刻）|
+| `TG_HELPER` | 见前置依赖 | poller / typing_loop / claim / finish | unit + hook + agent 环境（三处，或不设用默认）|
+| `TG_DEFER_WHILE_BUSY_SECS` | 0 | checker | **hook 的命令行**，例：`TG_DEFER_WHILE_BUSY_SECS=120 bash <dir>/tg_bridge_check.sh` |
+| `TG_PROC_STALE_SECS` | 1800 | claim | 一般不用改；要改就在调用 claim 的环境里 export |
+
+   ⚠️ 注意 `TG_DEFER_WHILE_BUSY_SECS` 的默认是 **0（关闭）**。unit 里以前那行 `=120` 从来没生效过
+   （checker 读不到），已删除；想开启必须写在 hook 命令上。
 
 ## 处理流程 (两步)
 
@@ -97,6 +110,9 @@ bash install.sh
 
 - **桥内固定开销 0–5 秒**，主要来自 5 秒的 hook 轮询相位（均值 2.5s）。poller 侧检测 ≈0.3–0.5s，checker 自身 ≈0.05s。整体地板约 0.4s，需要改成事件驱动才拿得到，收益上限 2.5s。
 - **更大的耗时在 Hatch 侧**（worker 派发 + handoff + 模型生成），不在本仓库里。
+- **心跳 stale 阈值**：按 `2 × (TG_LONGPOLL_TIMEOUT + 20)` 算，`TG_LONGPOLL_TIMEOUT=20` → **80 秒**。
+  Hatch 侧 keepalive 若还写着 150 秒（那是上游默认 50 秒长轮询的旧值），只是漏检更久、不会误杀；
+  建议改成 80–90 秒。`state/heartbeat` 由 `poller.py` 写，读它的在 Hatch 侧。
 - **单 owner**：只接受 `TG_OWNER_ID` 一个人的私聊消息，其他发件人和群聊静默丢弃。
 - 附件上限 20MB（`tg_claim.sh` 的 `MAX_BYTES`），超限只报尺寸不下载。
 

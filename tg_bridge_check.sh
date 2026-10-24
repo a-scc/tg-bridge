@@ -69,8 +69,8 @@ if os.path.isfile(_DL) and os.path.getsize(_DL) > 0:
 
 # Main-agent mode: deliver ONCE, then move to done. No lease,
 # no repeat, no head-of-line blocking. The main agent's reply IS the
-# handling. tg_send --done / --ack-only moves the record to
-# done/closed/; records left in done/ get one unclosed-timeout re-wake.
+# handling. tg_finish.sh moves the record to done/closed/; records left in
+# done/ get one unclosed-timeout re-wake.
 _DONE = os.path.join(INBOX, "done")
 
 # Batch coalescing: group inbox files by batch_id.

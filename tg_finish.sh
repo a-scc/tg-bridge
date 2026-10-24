@@ -382,12 +382,12 @@ def find_attachment(r):
 for r in closed_recs:
     if not r.get("file_id"):
         continue
-    src = find_attachment(r)
-    if not src:
+    asrc = find_attachment(r)      # 不能叫 src: 上面那个 src 记的是"本批 uid 来源", 会被覆盖
+    if not asrc:
         att_missing.append(r.get("update_id"))
         continue
     try:
-        os.replace(src, os.path.join(CLOSED, os.path.basename(src)))
+        os.replace(asrc, os.path.join(CLOSED, os.path.basename(asrc)))
         att_moved += 1
     except OSError:
         att_missing.append(r.get("update_id"))

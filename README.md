@@ -1,6 +1,6 @@
-# tg-bridge: Telegram ↔ Hatch 双向桥 (Muse 直连)
+# tg-bridge: Telegram ↔ Hatch 的 Muse 直连通道
 
-Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥捡起来唤醒 Hatch 里的本人处理，回复再经 Telegram 发回去。Worker 只当触发器，不冒名、不占位。
+Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥收到后唤醒 Hatch 里的 Muse 本人处理，回复再经 Telegram 发回去。Worker 只当触发器，不冒名、不占位。所谓“直连”，就是你直接和 Hatch 里的 Muse 本体对话，桥不代答，桥里也不跑模型。
 
 ## 前置依赖
 

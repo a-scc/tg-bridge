@@ -38,6 +38,14 @@ try:
 except ValueError:
     OWNER_ID = 0          # main() 会据此退出并给出提示
 
+# Helper 子进程预算。默认仍是"长轮询 + 20"; 本地模式把 helper 自己的 HTTP 超时放宽后,
+# 必须把这里也放大, 否则 poller 会先杀掉 helper(拿不到干净的报错, 还可能留孤儿进程)。
+# 分层要求: TG_LONGPOLL_TIMEOUT < helper 的 HTTP 超时 < TG_HELPER_TIMEOUT
+try:
+    HELPER_TIMEOUT = int(os.environ.get("TG_HELPER_TIMEOUT", "0") or 0)
+except ValueError:
+    HELPER_TIMEOUT = 0
+
 # Long-poll tuning: TG_LONGPOLL_TIMEOUT sets the getUpdates server-side
 # wait (default 20; upstream used 50, but egress proxy cuts connections
 # held longer than ~20-30s, so 20 is the safe default). The helper
@@ -503,7 +511,8 @@ def main():
             offset = read_offset()
             resp = tg("getupdates", "--offset", str(offset),
                       "--timeout", str(LONGPOLL_TIMEOUT),
-                      timeout=LONGPOLL_TIMEOUT + 20)
+                      timeout=(HELPER_TIMEOUT if HELPER_TIMEOUT > 0
+                               else LONGPOLL_TIMEOUT + 20))
             if not resp.get("ok"):
                 raise RuntimeError(f"getUpdates not ok: {resp}")
             for upd in resp.get("result", []):

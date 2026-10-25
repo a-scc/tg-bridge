@@ -342,7 +342,7 @@ if not sent:
              "已成功的分片不会重发")
 
 # ---------- 步骤 4: 只归档本批 ----------
-closed_count, att_moved, closed_recs, att_missing = 0, 0, [], []
+closed_count, att_moved, closed_recs, att_missing, att_remote = 0, 0, [], [], []
 for uid, p in targets:
     r = read_json(p)
     if r is not None:
@@ -384,6 +384,14 @@ for r in closed_recs:
         continue
     asrc = find_attachment(r)      # 不能叫 src: 上面那个 src 记的是"本批 uid 来源", 会被覆盖
     if not asrc:
+        if r.get("vps_path"):
+            # 本地模式: 文件在跑 Bot API 那台机器上, 桥本机没有它。
+            # 不搬、不报错、不算 missing —— 记录里已经带着 vps_path, 归档就按这个来。
+            att_remote.append({"update_id": r.get("update_id"),
+                               "vps_path": r.get("vps_path"),
+                               "file_size": r.get("vps_size") or r.get("file_size"),
+                               "file_name": r.get("file_name")})
+            continue
         att_missing.append(r.get("update_id"))
         continue
     try:
@@ -415,6 +423,7 @@ out("closed",
     closed_count=closed_count,
     attachments_moved=att_moved,
     attachments_missing=att_missing,
+    attachments_remote=att_remote,
     left_in_processing=leftovers,
     chunks=len(chunks),
     sent=True,

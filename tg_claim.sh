@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
 done
 
 python3 - "$BASE" "$TRIGGER_UID" "$DOWNLOAD" "$TAKEOVER" <<'PYEOF'
-import json, os, re, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 
 BASE     = sys.argv[1]
 TRIGGER  = (sys.argv[2] or "").strip()
@@ -62,7 +62,30 @@ CLAIMD = os.path.join(STATE, "claim")        # 每次认领一份归属记录
 
 TG_HELPER = os.path.expanduser(os.environ.get(
     "TG_HELPER", "~/workspace/custom-connectors/custom.telegram/bin/tg.py"))
-MAX_BYTES = 20971520                     # 与 HANDLING.md / tg.py --max-bytes 一致
+def _envint(name, default):
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return default
+
+
+# 模式与分档阈值。默认云端, 云端的行为与之前完全一致(单档 20MB)。
+MODE = (os.environ.get("TG_BRIDGE_MODE") or "cloud").strip().lower()
+if MODE not in ("cloud", "local"):
+    MODE = "cloud"
+MAX_BYTES_CLOUD = _envint("TG_MAX_BYTES_CLOUD", 20971520)          # 20MB, 云端单档
+MAX_BYTES_LOCAL = _envint("TG_MAX_BYTES_LOCAL", 2000 * 1024 * 1024)  # 2GB, Telegram 上限
+PULL_MAX_BYTES = _envint("TG_PULL_MAX_BYTES", 50 * 1024 * 1024)     # 50MB, 拉回桥本机的政策线
+LIMIT_BYTES = MAX_BYTES_LOCAL if MODE == "local" else MAX_BYTES_CLOUD
+
+# 本地模式下 helper 把文件落到"跑 Bot API 那台机器"的哪个目录。
+# 不配就沿用 inbox/files 的同一路径串 —— 桥与 Bot API 服务器同机时, 那就是本地路径, 不需要拉回。
+STAGE_DIR = (os.environ.get("TG_VPS_STAGING_DIR") or "").strip() or FILES
+# 跨机时把文件从 VPS 拉回桥本机用的 SSH/SCP。不配就只能报 vps_path。
+VPS_SSH = (os.environ.get("TG_VPS_SSH") or "").strip()
+VPS_SSH_PORT = _envint("TG_VPS_SSH_PORT", 22)
+VPS_SSH_KEY = (os.environ.get("TG_VPS_SSH_KEY") or "").strip()
+VPS_SSH_TIMEOUT = _envint("TG_VPS_SSH_TIMEOUT", 600)
 # 1800s: handler 正常 20-40s 就回完, 大附件下载最长 180s。等 30 分钟才判死,
 # 是为了宁可晚救孤儿批, 也不要抢走正在处理的批(抢走 = 重复回复)。
 try:
@@ -250,36 +273,117 @@ for uid, path in claimed:
     if r.get("file_id"):
         item = {"update_id": uid, "file_id": r["file_id"],
                 "file_name": r.get("file_name") or f"{uid}.bin", "file_size": fs}
-        (over_cap if (fs and fs > MAX_BYTES) else to_dl).append(item)
+        if fs and fs > LIMIT_BYTES:
+            item["limit_bytes"] = LIMIT_BYTES
+            item["mode"] = MODE
+            over_cap.append(item)
+        else:
+            to_dl.append(item)
     r["_claimed_path"] = path
     recs.append(r)
 
 rec_by_uid = {r["update_id"]: r for r in recs}
 
-downloaded, dl_errors = [], []
+
+def _pull_back(vps_path, name, size):
+    """把 VPS 上的文件弄到桥本机 inbox/files。返回 (local_path, how, error)。
+
+    how 取值:
+      in-place  helper 直接写在了 inbox/files（同机, 无需搬运）
+      move      同机/同挂载, 搬进 inbox/files
+      scp       跨机, 用 scp 拉回
+      remote    VPS 路径在桥本机上不可读, 且没配 TG_VPS_SSH → 只报路径
+      scp-failed / scp-error  scp 失败
+    """
+    target = os.path.join(FILES, name)
+    # 1) 先看是不是就在桥本机(同机/同挂载)。在, 就直接用 —— 跟大小无关,
+    #    因为没有任何网络搬运发生。政策线只管"要不要跨机拉"。
+    if os.path.isfile(vps_path):
+        if os.path.abspath(vps_path) == os.path.abspath(target):
+            return target, "in-place", None
+        try:
+            os.makedirs(FILES, exist_ok=True)
+            shutil.move(vps_path, target)
+            return target, "move", None
+        except OSError as e:
+            return None, "move-failed", f"{type(e).__name__}: {e}"
+    # 2) 跨机: 超过政策线连试都不试
+    if size and size > PULL_MAX_BYTES:
+        return None, "skipped-too-large", None
+    # 3) 跨机且配了 SSH 才 scp
+    if not VPS_SSH:
+        return None, "remote", "VPS 路径在桥本机不可读, 且未配置 TG_VPS_SSH"
+    cmd = ["scp", "-P", str(VPS_SSH_PORT),
+           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if VPS_SSH_KEY:
+        cmd += ["-i", VPS_SSH_KEY]
+    cmd += [f"{VPS_SSH}:{vps_path}", target]
+    try:
+        os.makedirs(FILES, exist_ok=True)
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=VPS_SSH_TIMEOUT)
+        if p.returncode == 0 and os.path.isfile(target):
+            return target, "scp", None
+        return None, "scp-failed", ((p.stderr or "").strip() or f"rc={p.returncode}")[-300:]
+    except Exception as e:
+        return None, "scp-error", f"{type(e).__name__}: {e}"
+
+downloaded, dl_errors, remote_only = [], [], []
 if DOWNLOAD:
     for a in to_dl:
         name = safe_name(a["file_name"], a["update_id"])
-        dst = os.path.join(FILES, name)
+        # 云端: 直接下到 inbox/files(与之前完全一致, 不做任何额外判断)
+        # 本地: 先落到 STAGE_DIR(跑 Bot API 那台机器的盘), 再按大小/可读性决定拉不拉回
+        dst = os.path.join(FILES, name) if MODE == "cloud" else os.path.join(STAGE_DIR, name)
         err = None
         try:
             p = subprocess.run(
                 [sys.executable, TG_HELPER, "download", a["file_id"], dst,
-                 "--max-bytes", str(MAX_BYTES)],
+                 "--max-bytes", str(LIMIT_BYTES)],
                 capture_output=True, text=True, timeout=180)
             try:
                 ok = bool(json.loads((p.stdout or "").strip()).get("ok"))
             except Exception:
                 ok = False
-            if ok and os.path.isfile(dst):
-                a["local_path"] = dst
-                a["local_name"] = name
-                downloaded.append(a)
-                # 把落盘名写回记录: finish 按这个名字搬, 不用猜 safe_name 怎么改的字符
+            if ok and (os.path.isfile(dst) or MODE == "local"):
                 r = rec_by_uid.get(a["update_id"])
-                if r is not None:
-                    r["_local_name"] = name
-                continue
+                if MODE == "cloud":
+                    if os.path.isfile(dst):
+                        a["local_path"] = dst
+                        a["local_name"] = name
+                        downloaded.append(a)
+                        # 把落盘名写回记录: finish 按这个名字搬, 不用猜 safe_name 怎么改的字符
+                        if r is not None:
+                            r["_local_name"] = name
+                        continue
+                    err = "helper 说成功但文件不在"
+                else:
+                    vps_path = dst
+                    size = a.get("file_size") or 0
+                    if not size:
+                        try:
+                            size = os.path.getsize(vps_path)
+                        except OSError:
+                            size = 0
+                    if r is not None:
+                        r["vps_path"] = vps_path
+                        r["vps_size"] = size
+                        if STAGE_DIR != FILES:
+                            r["vps_stage_dir"] = STAGE_DIR
+                    local, how, perr = _pull_back(vps_path, name, size)
+                    a["pull"] = how
+                    a["vps_path"] = vps_path
+                    if local:
+                        a["local_path"] = local
+                        a["local_name"] = name
+                        if r is not None:
+                            r["_local_name"] = name
+                        downloaded.append(a)
+                    else:
+                        a["error"] = perr
+                        if r is not None:
+                            r["remote_only"] = True
+                        remote_only.append(a)
+                    continue
             err = ((p.stdout or "").strip() or (p.stderr or "").strip())[-300:]
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
@@ -295,9 +399,10 @@ if DOWNLOAD:
         except OSError:
             pass
 
-# 把 _local_name 持久化进 processing/ 里的记录(崩溃/重跑也能找到附件)
+# 把 _local_name / vps_path / remote_only 持久化进 processing/ 里的记录
+# (崩溃重跑时 finish 还能按记录找到文件, 不论是本机还是 VPS 上的)
 for r in recs:
-    if not r.get("_local_name"):
+    if not (r.get("_local_name") or r.get("vps_path")):
         continue
     pth = r.get("_claimed_path")
     if not pth:
@@ -351,9 +456,15 @@ out("claimed",
     chat_id=chat_id,
     takeover=bool(takeover),
     records=recs,
+    mode=MODE,
     attachments=downloaded,
+    remote_only=remote_only,
     attachment_errors=dl_errors,
     over_cap=over_cap,
+    pull_max_bytes=PULL_MAX_BYTES if MODE == "local" else None,
+    warnings=([ "本地模式未设置 TG_VPS_STAGING_DIR: helper 会直接写进 inbox/files。"
+                "桥与 Bot API 服务器不同机时, 这等于把大文件下进沙箱 —— 请设为 VPS 上的目录。"]
+              if (MODE == "local" and STAGE_DIR == FILES) else []),
     processing_dir=PROC,
     next_step=("生成一条回复(一批只回一条), 然后用 claim_id 收尾:\n"
                f"  bash <bridge>/tg_finish.sh --chat-id {chat_id} "

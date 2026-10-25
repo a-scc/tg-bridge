@@ -212,6 +212,58 @@ MAX_BYTES 不能硬编码 20MB，要按模式改（云端 20MB，本地 2GB）�
 实际监听地址以 ss 实查为准，不要默认回环，服务器重启后绑定可能改变，旧隧道随即失效。
 切本地前先在云端 log_out，切回云端要先停本地、去掉本地地址、再等约 10 分钟，两个模式不能双跑。
 
+### 6. 本地模式的配置与轮询分层
+
+模式与阈值全部走环境变量，默认云端；云端行为不变（单档 20MB，超了 `over_cap`、不碰 getFile）。
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `TG_BRIDGE_MODE` | `cloud` | `local` 才启用两档阈值与"落盘不回" |
+| `TG_MAX_BYTES_CLOUD` | 20971520 | 云端单档上限（20MB） |
+| `TG_MAX_BYTES_LOCAL` | 2097152000 | 本地单档上限（Telegram 2000MB） |
+| `TG_PULL_MAX_BYTES` | 52428800 | 拉回桥本机的政策线（50MB）；超过只报路径 |
+| `TG_VPS_STAGING_DIR` | 空 | helper 落盘的目录（**VPS 上的路径**）。空 = 沿用 `<bridge>/inbox/files` 的同一路径串 |
+| `TG_VPS_SSH` | 空 | `user@host`。跨机拉回用；不配就只能报 `vps_path` |
+| `TG_VPS_SSH_PORT` / `TG_VPS_SSH_KEY` | 22 / 空 | 同上 |
+| `TG_HELPER_TIMEOUT` | 0（= 长轮询 + 20） | helper 子进程预算，见下面"轮询分层" |
+
+**拉回与否是运行时探测出来的，不是配出来的**（顺序固定）：
+
+1. `vps_path` 在桥本机**可读** → 说明桥与 Bot API 服务器同机/同挂载，直接用；若它不在 `inbox/files` 下就搬过去
+2. 不可读，且配了 `TG_VPS_SSH`，且体积 ≤ `TG_PULL_MAX_BYTES` → `scp` 拉回
+3. 以上都不成立 → **只报 `vps_path` + 大小 + 元数据**，消息照常回复，不报错、不丢
+
+超过 `TG_PULL_MAX_BYTES` 的文件**连试都不试**（不判断可读性、不 scp）。
+
+**轮询分层**（本地模式超时的关键，四层必须递增）：
+
+```
+Bot API 服务端等待  ≤  TG_LONGPOLL_TIMEOUT  <  helper 的 HTTP 超时  <  TG_HELPER_TIMEOUT
+```
+
+`TG_HELPER_TIMEOUT` 不配时等于 `TG_LONGPOLL_TIMEOUT + 20`。本地推荐：
+
+| 项 | 值 |
+|---|---|
+| `TG_LONGPOLL_TIMEOUT` | 10 |
+| helper 的 HTTP 超时（本地专用 helper） | 60 |
+| `TG_HELPER_TIMEOUT` | 75 |
+
+> 只把 `TG_LONGPOLL_TIMEOUT` 调成 10、helper 超时放到 60 是**不够的**：默认预算会变成
+> `10 + 20 = 30`，poller 会先杀掉 helper，拿不到 helper 的干净报错，还可能留下孤儿进程。
+> 所以 `TG_HELPER_TIMEOUT` 必须一起放大。云端 helper 的 30 秒不要动，云端配置也不用动。
+
+**先确认拓扑再配**（三条都是只读）：
+
+```bash
+# A. 桥能不能直接读 helper 落的盘（同机/同挂载？）
+test -r "$VPS_PATH" && echo same-host || echo cross-host
+# B. helper 的落盘目录是哪个
+python3 "$TG_HELPER" download-file --file-id <FILE_ID> --out-dir <DIR>
+# C. 跨机时 ssh 通不通
+ssh -o BatchMode=yes -o ConnectTimeout=5 "$TG_VPS_SSH" true && echo ssh-ok
+```
+
 ## 红线
 
 - Token 经连接器代换，绝不落盘、不进日志。

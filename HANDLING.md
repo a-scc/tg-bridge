@@ -35,8 +35,12 @@ bash ~/workspace/tg-bridge-deploy/tg_claim.sh
 
 `claimed` 时 JSON 里有你要的全部信息：`claim_id`（**第 2 步必须带上**，它标记这批归你）、
 `records`（每条消息的 `text`/`kind`/`file_size`/`quoted`）、`attachments`（**已下好**，带
-`local_path`，直接查看）、`over_cap`（超 20MB，没下）、`attachment_errors`（下载失败，但消息不丢）、
-`chat_id`、`claimed_uids`。
+`local_path`，直接查看）、`remote_only`（本地模式下文件在 VPS 上，只有 `vps_path` 和大小，**本机没有文件**）、
+`over_cap`（超上限没下：云端 20MB / 本地 2GB，条目里带 `limit_bytes`）、
+`attachment_errors`（下载失败，但消息不丢）、`chat_id`、`claimed_uids`、`mode`。
+
+> **`remote_only` 里的东西你没拿到**。回复时可以说"文件在服务器上/我这边存着"，**不要**说"我看了"
+> 或引用内容——你看不到那些字节。
 
 `claim_id` 是这批的归属凭证：`tg_finish.sh` 只归档这个 id 名下的 uid，`processing/` 里别人的
 记录一个字都不动。**两个 handler 同时跑也不会互相吞掉对方的消息。**

@@ -267,6 +267,14 @@ TG_VPS_FETCH_CMD='ssh <USER@VPS> python3 <VPS 上的 helper> download-file --fil
 
 命令本身在服务器侧跑，所以是那一侧决定落盘位置；`vps_path` 取它回报的值，**不再由桥拼**。
 
+**`vps_path` 落盘与上报前会脱敏。** getFile 的路径可能是带令牌的 URL
+（`https://api.telegram.org/file/bot<token>/...`），而 `processing/*.json`、`closed/*.json`
+和 claim 的输出都会被 agent 读到——原样存就等于令牌落盘。所以：
+
+- 存/报之前把 `/bot<token>` 换成 `/bot<REDACTED>`、裸令牌换成 `<TOKEN>`，并在记录里标 `vps_path_redacted: true`
+- **真实路径只在内存里用于 scp**，不落盘、不上报
+- 下载失败的错误信息也走同一层脱敏后才写进 `download-errors.log` 和输出
+
 **同机部署**（桥和 Bot API 服务器同一台）不需要 FETCH_CMD：`isfile(vps_path)` 直接为真，没有中转，政策线也不适用（本来就没有网络搬运）。
 
 **轮询分层**（本地模式超时的关键，四层必须递增）：

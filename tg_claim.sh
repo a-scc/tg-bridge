@@ -295,6 +295,32 @@ for uid, path in claimed:
 rec_by_uid = {r["update_id"]: r for r in recs}
 
 
+_REDACT_PATTERNS = (
+    # URL 里的 bot<token>: https://api.telegram.org/file/bot123:ABC.../documents/x.pdf
+    (re.compile(r"/bot[^/\s]+"), "/bot<REDACTED>"),
+    # 裸 token 形态: <数字>:<35 位左右>
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{25,}"), "<TOKEN>"),
+)
+
+
+def _redact(text, limit=400):
+    """把可能夹带令牌的片段换掉。返回 (脱敏后的文本, 是否改动过)。
+
+    为什么要: 本地模式 getFile 的路径可能是带 bot<token> 的 URL; vps_path 会被写进
+    processing/*.json、closed/*.json 和 claim 的输出 —— 原样存就等于令牌落盘。
+    真实路径只在内存里用于 scp, 落盘/上报一律走这里。
+    """
+    if not text:
+        return text, False
+    out, changed = str(text), False
+    for rx, repl in _REDACT_PATTERNS:
+        out2 = rx.sub(repl, out)
+        if out2 != out:
+            changed = True
+            out = out2
+    return out[:limit], changed
+
+
 def _reported_path(resp):
     """从 helper 的 JSON 里取它真正落盘的路径(本地模式下 getFile 的返回)。
     取不到就返回 None, 由调用方退回自己拼的路径。"""
@@ -451,14 +477,18 @@ if DOWNLOAD:
                             size = os.path.getsize(vps_path)
                         except OSError:
                             size = 0
+                    # 脱敏只影响"落盘/上报"; _pull_back 仍然用真实路径(scp 要用)
+                    shown_path, was_redacted = _redact(vps_path)
                     if r is not None:
-                        r["vps_path"] = vps_path
+                        r["vps_path"] = shown_path
                         r["vps_size"] = size
+                        if was_redacted:
+                            r["vps_path_redacted"] = True
                         if STAGE_DIR != FILES:
                             r["vps_stage_dir"] = STAGE_DIR
                     local, how, perr = _pull_back(vps_path, name, size)
                     a["pull"] = how
-                    a["vps_path"] = vps_path
+                    a["vps_path"] = shown_path
                     if local:
                         a["local_path"] = local
                         a["local_name"] = name
@@ -474,14 +504,15 @@ if DOWNLOAD:
             err = ((p.stdout or "").strip() or (p.stderr or "").strip())[-300:]
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
-        a["error"] = err
+        shown_err, _ = _redact(err)
+        a["error"] = shown_err
         dl_errors.append(a)
         try:                                     # 不丢消息: 失败也继续回复文字部分
             with open(os.path.join(STATE, "download-errors.log"), "a",
                       encoding="utf-8") as f:
                 f.write(json.dumps({"time": time.time(),
                                     "update_id": a["update_id"],
-                                    "file_id": a["file_id"], "error": err},
+                                    "file_id": a["file_id"], "error": shown_err},
                                    ensure_ascii=False) + "\n")
         except OSError:
             pass

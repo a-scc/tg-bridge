@@ -1,4 +1,4 @@
-# tg-bridge: Telegram ↔ Hatch 双向桥 (纯本人链路)
+# tg-bridge: Telegram ↔ Hatch 双向桥 (Muse 直连)
 
 Telegram Bot API 到 Hatch 的桥：用户在 Telegram 发消息，桥捡起来唤醒 Hatch 里的本人处理，回复再经 Telegram 发回去。Worker 只当触发器，不冒名、不占位。
 
@@ -267,13 +267,17 @@ TG_VPS_FETCH_CMD='ssh <USER@VPS> python3 <VPS 上的 helper> download-file --fil
 
 命令本身在服务器侧跑，所以是那一侧决定落盘位置；`vps_path` 取它回报的值，**不再由桥拼**。
 
-**`vps_path` 落盘与上报前会脱敏。** getFile 的路径可能是带令牌的 URL
-（`https://api.telegram.org/file/bot<token>/...`），而 `processing/*.json`、`closed/*.json`
-和 claim 的输出都会被 agent 读到——原样存就等于令牌落盘。所以：
+**`vps_path` 落盘与上报前会脱敏。** 两种形态都会带令牌：
+
+- 本地模式：getFile 给的是**文件系统路径**，但父目录常以令牌命名（`<data_dir>/<token>/documents/x.pdf`）
+- 云端下载：URL 形如 `https://api.telegram.org/file/bot<token>/...`
+
+而 `processing/*.json`、`closed/*.json` 和 claim 的输出都会被 agent 读到——原样存就等于令牌落盘。所以：
 
 - 存/报之前把 `/bot<token>` 换成 `/bot<REDACTED>`、裸令牌换成 `<TOKEN>`，并在记录里标 `vps_path_redacted: true`
 - **真实路径只在内存里用于 scp**，不落盘、不上报
-- 下载失败的错误信息也走同一层脱敏后才写进 `download-errors.log` 和输出
+- 下载失败的错误信息、`_pull_back` 的失败原因（`move-failed` / `scp-failed` 的 stderr 会带路径）、
+  以及 `vps_stage_dir`，都走同一层脱敏后才写进 `download-errors.log` 和输出
 
 **同机部署**（桥和 Bot API 服务器同一台）不需要 FETCH_CMD：`isfile(vps_path)` 直接为真，没有中转，政策线也不适用（本来就没有网络搬运）。
 

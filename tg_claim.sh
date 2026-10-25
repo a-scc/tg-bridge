@@ -431,7 +431,7 @@ if DOWNLOAD:
         # 本地: 先落到 STAGE_DIR(跑 Bot API 那台机器的盘), 再按大小/可读性决定拉不拉回
         dst = os.path.join(FILES, name) if MODE == "cloud" else os.path.join(STAGE_DIR, name)
         err = None
-        resp, vps_path = {}, None
+        resp, vps_path, p = {}, None, None
         try:
             if MODE == "local" and VPS_FETCH_CMD:
                 # 服务器侧取文件: getFile 落在跑 Bot API 那台机器上, 不经沙箱中转,
@@ -485,7 +485,7 @@ if DOWNLOAD:
                         if was_redacted:
                             r["vps_path_redacted"] = True
                         if STAGE_DIR != FILES:
-                            r["vps_stage_dir"] = STAGE_DIR
+                            r["vps_stage_dir"] = _redact(STAGE_DIR)[0]
                     local, how, perr = _pull_back(vps_path, name, size)
                     a["pull"] = how
                     a["vps_path"] = shown_path
@@ -496,12 +496,16 @@ if DOWNLOAD:
                             r["_local_name"] = name
                         downloaded.append(a)
                     else:
-                        a["error"] = perr
+                        # _pull_back 的错误里会带路径(move-failed 的 OSError、scp 的 stderr),
+                        # 同样要脱敏后才上报
+                        shown_perr, _ = _redact(perr)
+                        a["error"] = shown_perr
                         if r is not None:
                             r["remote_only"] = True
                         remote_only.append(a)
                     continue
-            err = ((p.stdout or "").strip() or (p.stderr or "").strip())[-300:]
+            if p is not None:      # FETCH_CMD 那条路没有 p, 别覆盖已经拿到的 ferr
+                err = ((p.stdout or "").strip() or (p.stderr or "").strip())[-300:]
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
         shown_err, _ = _redact(err)

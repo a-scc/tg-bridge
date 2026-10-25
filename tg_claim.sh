@@ -45,7 +45,7 @@ while [ $# -gt 0 ]; do
 done
 
 python3 - "$BASE" "$TRIGGER_UID" "$DOWNLOAD" "$TAKEOVER" <<'PYEOF'
-import json, os, re, shutil, subprocess, sys, time
+import json, os, re, shlex, shutil, subprocess, sys, time
 
 BASE     = sys.argv[1]
 TRIGGER  = (sys.argv[2] or "").strip()
@@ -86,6 +86,16 @@ VPS_SSH = (os.environ.get("TG_VPS_SSH") or "").strip()
 VPS_SSH_PORT = _envint("TG_VPS_SSH_PORT", 22)
 VPS_SSH_KEY = (os.environ.get("TG_VPS_SSH_KEY") or "").strip()
 VPS_SSH_TIMEOUT = _envint("TG_VPS_SSH_TIMEOUT", 600)
+# scp 的 host key: BatchMode 下没有 known_hosts 条目会直接失败(不弹窗)。
+# 默认 accept-new(首次接受并存下), 路径可配且必须持久 —— 有的环境重启后 ~/.ssh 会被清掉。
+VPS_KNOWN_HOSTS = (os.environ.get("TG_VPS_KNOWN_HOSTS")
+                   or os.path.expanduser("~/.ssh/known_hosts"))
+VPS_STRICT = (os.environ.get("TG_VPS_STRICT_HOST_KEY") or "accept-new").strip()
+# 服务器侧取文件: 让 getFile 落在跑 Bot API 那台机器上, 不把文件先拉进沙箱。
+# 模板里可用 {file_id} {name} {dst} {stage_dir}, 值会被 shell 引用(防注入)。
+# 命令需输出带 path/file_path/vps_path 的 JSON, 或一行纯路径。
+VPS_FETCH_CMD = (os.environ.get("TG_VPS_FETCH_CMD") or "").strip()
+VPS_FETCH_TIMEOUT = _envint("TG_VPS_FETCH_TIMEOUT", 3600)
 # 1800s: handler 正常 20-40s 就回完, 大附件下载最长 180s。等 30 分钟才判死,
 # 是为了宁可晚救孤儿批, 也不要抢走正在处理的批(抢走 = 重复回复)。
 try:
@@ -285,6 +295,57 @@ for uid, path in claimed:
 rec_by_uid = {r["update_id"]: r for r in recs}
 
 
+def _reported_path(resp):
+    """从 helper 的 JSON 里取它真正落盘的路径(本地模式下 getFile 的返回)。
+    取不到就返回 None, 由调用方退回自己拼的路径。"""
+    if not isinstance(resp, dict):
+        return None
+    for k in ("path", "file_path", "vps_path", "local_path", "saved_to"):
+        v = resp.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    r = resp.get("result")
+    if isinstance(r, dict):
+        for k in ("path", "file_path", "vps_path", "saved_to"):
+            v = r.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
+def _vps_fetch(tpl, file_id, name, dst):
+    """在服务器侧取文件(不落沙箱)。返回 (vps_path, size, error)。"""
+    cmd = tpl
+    for k, v in (("{file_id}", file_id), ("{name}", name),
+                 ("{dst}", dst), ("{stage_dir}", STAGE_DIR)):
+        cmd = cmd.replace(k, shlex.quote(str(v)))
+    try:
+        p = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True,
+                           text=True, timeout=VPS_FETCH_TIMEOUT)
+    except Exception as e:
+        return None, 0, f"fetch-cmd {type(e).__name__}: {e}"
+    out = (p.stdout or "").strip()
+    if p.returncode != 0:
+        return None, 0, (f"fetch-cmd rc={p.returncode}: "
+                         + ((p.stderr or "").strip() or out)[-300:])
+    path, size = None, 0
+    try:
+        d = json.loads(out)
+        if isinstance(d, dict):
+            path = _reported_path(d)
+            size = int(d.get("size") or d.get("file_size") or 0)
+    except Exception:
+        path = out.splitlines()[-1].strip() if out else None
+    if not path:
+        return None, 0, f"fetch-cmd 没给出路径: {out[-200:]}"
+    if not size:
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = 0
+    return path, size, None
+
+
 def _pull_back(vps_path, name, size):
     """把 VPS 上的文件弄到桥本机 inbox/files。返回 (local_path, how, error)。
 
@@ -313,8 +374,17 @@ def _pull_back(vps_path, name, size):
     # 3) 跨机且配了 SSH 才 scp
     if not VPS_SSH:
         return None, "remote", "VPS 路径在桥本机不可读, 且未配置 TG_VPS_SSH"
+    try:
+        kh = os.path.expanduser(VPS_KNOWN_HOSTS)
+        os.makedirs(os.path.dirname(kh) or ".", exist_ok=True)
+        open(kh, "a").close()
+    except OSError:
+        kh = ""
     cmd = ["scp", "-P", str(VPS_SSH_PORT),
-           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+           "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           "-o", f"StrictHostKeyChecking={VPS_STRICT}"]
+    if kh:
+        cmd += ["-o", f"UserKnownHostsFile={kh}"]
     if VPS_SSH_KEY:
         cmd += ["-i", VPS_SSH_KEY]
     cmd += [f"{VPS_SSH}:{vps_path}", target]
@@ -335,15 +405,29 @@ if DOWNLOAD:
         # 本地: 先落到 STAGE_DIR(跑 Bot API 那台机器的盘), 再按大小/可读性决定拉不拉回
         dst = os.path.join(FILES, name) if MODE == "cloud" else os.path.join(STAGE_DIR, name)
         err = None
+        resp, vps_path = {}, None
         try:
-            p = subprocess.run(
-                [sys.executable, TG_HELPER, "download", a["file_id"], dst,
-                 "--max-bytes", str(LIMIT_BYTES)],
-                capture_output=True, text=True, timeout=180)
-            try:
-                ok = bool(json.loads((p.stdout or "").strip()).get("ok"))
-            except Exception:
-                ok = False
+            if MODE == "local" and VPS_FETCH_CMD:
+                # 服务器侧取文件: getFile 落在跑 Bot API 那台机器上, 不经沙箱中转,
+                # vps_path 用命令回报的真路径(不是我们拼的 STAGE_DIR/name)。
+                vps_path, fsize, ferr = _vps_fetch(VPS_FETCH_CMD, a["file_id"], name, dst)
+                if ferr:
+                    ok = False
+                    err = ferr
+                else:
+                    ok = True
+                    if fsize:
+                        a["vps_size"] = fsize
+            else:
+                p = subprocess.run(
+                    [sys.executable, TG_HELPER, "download", a["file_id"], dst,
+                     "--max-bytes", str(LIMIT_BYTES)],
+                    capture_output=True, text=True, timeout=180)
+                try:
+                    resp = json.loads((p.stdout or "").strip())
+                    ok = bool(resp.get("ok"))
+                except Exception:
+                    resp, ok = {}, False
             if ok and (os.path.isfile(dst) or MODE == "local"):
                 r = rec_by_uid.get(a["update_id"])
                 if MODE == "cloud":
@@ -357,7 +441,10 @@ if DOWNLOAD:
                         continue
                     err = "helper 说成功但文件不在"
                 else:
-                    vps_path = dst
+                    if not vps_path:
+                        # 没走服务器侧取文件时, helper 已经把文件落进 dst(经沙箱);
+                        # 但它若回报了真实路径(getFile 的), 以回报为准。
+                        vps_path = _reported_path(resp) or dst
                     size = a.get("file_size") or 0
                     if not size:
                         try:
@@ -462,9 +549,15 @@ out("claimed",
     attachment_errors=dl_errors,
     over_cap=over_cap,
     pull_max_bytes=PULL_MAX_BYTES if MODE == "local" else None,
-    warnings=([ "本地模式未设置 TG_VPS_STAGING_DIR: helper 会直接写进 inbox/files。"
-                "桥与 Bot API 服务器不同机时, 这等于把大文件下进沙箱 —— 请设为 VPS 上的目录。"]
-              if (MODE == "local" and STAGE_DIR == FILES) else []),
+    warnings=[w for w in (
+        ("本地模式未设置 TG_VPS_STAGING_DIR: helper 会直接写进 inbox/files。"
+         "桥与 Bot API 服务器不同机时, 这等于把大文件下进沙箱 —— 请设为 VPS 上的目录。")
+        if (MODE == "local" and STAGE_DIR == FILES) else None,
+        ("本地模式未配置 TG_VPS_FETCH_CMD: 文件会经 helper 先进沙箱, "
+         "50MB 政策线无法保证(大文件照样会被拉进来)。"
+         "跨机部署请配成 \"在服务器侧执行 getFile\" 的命令。")
+        if (MODE == "local" and not VPS_FETCH_CMD) else None,
+    ) if w],
     processing_dir=PROC,
     next_step=("生成一条回复(一批只回一条), 然后用 claim_id 收尾:\n"
                f"  bash <bridge>/tg_finish.sh --chat-id {chat_id} "

@@ -193,7 +193,7 @@ TG_HELPER_REAL=<真实 tg.py 的路径>
 
 ### 2. 落盘不回
 
-本地模式下，文件落在跑 Bot API 那台机器的盘上，getFile 返回的是 VPS 本机绝对路径，沙箱上的 agent 看不到那个路径。
+本地模式下，文件落在跑 Bot API 那台机器的盘上，getFile 返回的是 VPS 本机绝对路径，沙箱上的 agent 看得到路径串，但打不开/用不了那个路径下的文件。
 大文件（>50MB，政策线，非 Telegram 硬上限）永不拉回沙箱，只报 VPS 路径、大小、元数据，在 VPS 本地直接发 TG 或传 Drive/Photos。
 
 ### 3. 上限分档
@@ -225,7 +225,24 @@ MAX_BYTES 不能硬编码 20MB，要按模式改（云端 20MB，本地 2GB）�
 | `TG_VPS_STAGING_DIR` | 空 | helper 落盘的目录（**VPS 上的路径**）。空 = 沿用 `<bridge>/inbox/files` 的同一路径串 |
 | `TG_VPS_SSH` | 空 | `user@host`。跨机拉回用；不配就只能报 `vps_path` |
 | `TG_VPS_SSH_PORT` / `TG_VPS_SSH_KEY` | 22 / 空 | 同上 |
+| `TG_VPS_KNOWN_HOSTS` | `~/.ssh/known_hosts` | **要放持久路径**；`BatchMode` 下没有 host key 会直接拒连 |
+| `TG_VPS_STRICT_HOST_KEY` | `accept-new` | `accept-new`=首次存下之后校验；`yes`=先手工录入；`no`=不校验 |
+| `TG_VPS_FETCH_CMD` | 空 | **跨机必配**：在服务器侧执行 getFile 的命令；不配则文件会经沙箱中转 |
+| `TG_VPS_FETCH_TIMEOUT` | 3600 | 上面那条命令的超时 |
 | `TG_HELPER_TIMEOUT` | 0（= 长轮询 + 20） | helper 子进程预算，见下面"轮询分层" |
+
+**谁读哪个变量**（配错地方 = 静默降级，而且不报错）：
+
+| 变量 | 读取进程 | 该配在哪 |
+|---|---|---|
+| `TG_LONGPOLL_TIMEOUT` / `TG_HELPER_TIMEOUT` | `poller.py` | systemd unit（或 poller 的环境） |
+| `TG_BRIDGE_MODE` / `TG_MAX_BYTES_*` / `TG_PULL_MAX_BYTES` / `TG_VPS_*` | `tg_claim.sh` | **agent 调 claim 时的环境**（hook 命令行 / agent shell） |
+| `TG_DEFER_WHILE_BUSY_SECS` | `tg_bridge_check.sh` | hook 的命令行 |
+
+两个静默陷阱，都不会报错：
+
+- 只把 `TG_BRIDGE_MODE=local` 配在 **unit** 里 → poller 根本不读它，claim 仍按云端 20MB 判 `over_cap`
+- 只把它配在 **agent shell** 里 → claim 对了，但 poller 的超时仍按云端那套（`TG_HELPER_TIMEOUT` 读不到）
 
 **拉回与否是运行时探测出来的，不是配出来的**（顺序固定）：
 
@@ -235,11 +252,32 @@ MAX_BYTES 不能硬编码 20MB，要按模式改（云端 20MB，本地 2GB）�
 
 超过 `TG_PULL_MAX_BYTES` 的文件**连试都不试**（不判断可读性、不 scp）。
 
+**跨机部署必须配 `TG_VPS_FETCH_CMD`，否则 50MB 政策线不成立。** 原因很实在：
+
+- helper 的 `download` 命令是"把文件取到**调用方**这台机器上"。桥在沙箱里，所以文件会先被拉进沙箱
+- 一旦拉进来，`vps_path` 就是**沙箱里的路径**，`isfile()` 为真 → 判成 `in-place`，政策线根本轮不到
+- 所以跨机时不能让 helper 直接 `download`，而要让它**在服务器侧**取文件、只回报路径
+
+`TG_VPS_FETCH_CMD` 就是这条命令，模板支持 `{file_id}` `{name}` `{dst}` `{stage_dir}`（值会被 shell 引用，防注入），
+输出需带 `path`/`file_path`/`vps_path` 的 JSON，或一行纯路径。示例（占位，按你们实际 helper 路径填）：
+
+```bash
+TG_VPS_FETCH_CMD='ssh <USER@VPS> python3 <VPS 上的 helper> download-file --file-id {file_id} --out-dir <VPS 目录>'
+```
+
+命令本身在服务器侧跑，所以是那一侧决定落盘位置；`vps_path` 取它回报的值，**不再由桥拼**。
+
+**同机部署**（桥和 Bot API 服务器同一台）不需要 FETCH_CMD：`isfile(vps_path)` 直接为真，没有中转，政策线也不适用（本来就没有网络搬运）。
+
 **轮询分层**（本地模式超时的关键，四层必须递增）：
 
+**五层，从里到外必须递增**（漏掉任何一层都会由内层先「自杀」，拿不到干净报错）：
+
 ```
-Bot API 服务端等待  ≤  TG_LONGPOLL_TIMEOUT  <  helper 的 HTTP 超时  <  TG_HELPER_TIMEOUT
+Bot API 服务端等待 ≤ TG_LONGPOLL_TIMEOUT < 适配器内层(长轮询+10) < helper 的 HTTP 超时 < TG_HELPER_TIMEOUT
 ```
+
+`bin/tg_adapter.py` 的 getupdates 分支是 `长轮询 + 10`，这一层容易被忽略。
 
 `TG_HELPER_TIMEOUT` 不配时等于 `TG_LONGPOLL_TIMEOUT + 20`。本地推荐：
 
@@ -248,6 +286,8 @@ Bot API 服务端等待  ≤  TG_LONGPOLL_TIMEOUT  <  helper 的 HTTP 超时  < 
 | `TG_LONGPOLL_TIMEOUT` | 10 |
 | helper 的 HTTP 超时（本地专用 helper） | 60 |
 | `TG_HELPER_TIMEOUT` | 75 |
+| 适配器内层（`长轮询 + 10`） | 20，落在 10 与 60 之间 ✅ |
+| `tg.py` 的 HTTP 超时 | **部署前必须确认 > 长轮询 + 开销**（建议 60）；这个值在 helper 侧，仓库改不了 |
 
 > 只把 `TG_LONGPOLL_TIMEOUT` 调成 10、helper 超时放到 60 是**不够的**：默认预算会变成
 > `10 + 20 = 30`，poller 会先杀掉 helper，拿不到 helper 的干净报错，还可能留下孤儿进程。
